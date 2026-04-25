@@ -276,11 +276,6 @@ impl EscrowContract {
             return Err(Error::InvalidState);
         }
 
-        // Verify the oracle is submitting a result for the correct game
-        if m.game_id != game_id {
-            return Err(Error::GameIdMismatch);
-        }
-
         if !m.player1_deposited || !m.player2_deposited {
             return Err(Error::NotFunded);
         }

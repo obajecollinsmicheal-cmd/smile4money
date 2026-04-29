@@ -46,6 +46,7 @@ pub enum DataKey {
     Match(u64),
     MatchCount,
     Oracle,
+    OracleContract,
     Admin,
     Paused,
     Token,

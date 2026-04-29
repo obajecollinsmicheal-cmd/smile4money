@@ -4,8 +4,8 @@
 //! complete match lifecycle: create -> both deposits -> oracle submits result ->
 //! verify payouts, for all three outcomes (Player1 wins, Player2 wins, Draw).
 //!
-//! These tests exercise the escrow contract in isolation (the oracle address is
-//! just a trusted `Address`; no cross-contract call is required) and verify:
+//! These tests exercise the escrow contract together with the oracle contract
+//! (cross-contract call path) and verify:
 //!   - Correct state transitions at every step
 //!   - Token balance changes for both players and the escrow contract
 //!   - `get_escrow_balance` and `is_funded` query accuracy throughout
@@ -13,6 +13,8 @@
 //!   - Error paths: wrong oracle, game_id mismatch, invalid state re-entry
 
 use super::*;
+use smile4money_oracle::{OracleContract, OracleContractClient};
+use smile4money_oracle::types::MatchResult;
 use soroban_sdk::{
     testutils::{Address as _, Events},
     token::{Client as TokenClient, StellarAssetClient},
@@ -23,16 +25,16 @@ use soroban_sdk::{
 // Shared setup
 // ---------------------------------------------------------------------------
 
-/// Spin up a fresh environment with two players, a token, and an initialised
-/// escrow contract.  Each player starts with 1 000 tokens.
+/// Spin up a fresh environment with two players, a token, an oracle contract,
+/// and an initialised escrow contract.  Each player starts with 1 000 tokens.
 ///
-/// Returns `(env, contract_id, oracle, player1, player2, token_addr, admin)`.
+/// Returns `(env, escrow_id, oracle_service_addr, player1, player2, token_addr, admin)`.
 fn setup_e2e() -> (Env, Address, Address, Address, Address, Address, Address) {
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let oracle = Address::generate(&env);
+    let oracle_service = Address::generate(&env);
     let player1 = Address::generate(&env);
     let player2 = Address::generate(&env);
 
@@ -42,11 +44,38 @@ fn setup_e2e() -> (Env, Address, Address, Address, Address, Address, Address) {
     asset_client.mint(&player1, &1_000);
     asset_client.mint(&player2, &1_000);
 
+    // Deploy oracle contract and initialise it with the oracle service address as admin
+    let oracle_contract_id = env.register(OracleContract, ());
+    let oracle_client = OracleContractClient::new(&env, &oracle_contract_id);
+    oracle_client.initialize(&oracle_service);
+
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&oracle, &admin, &token_addr);
+    client.initialize(&oracle_service, &oracle_contract_id, &admin, &token_addr);
 
-    (env, contract_id, oracle, player1, player2, token_addr, admin)
+    (env, contract_id, oracle_service, player1, player2, token_addr, admin)
+}
+
+/// Convenience: submit a result to the oracle contract *and* trigger the escrow payout.
+fn oracle_submit_e2e(
+    env: &Env,
+    escrow_id: &Address,
+    oracle_service: &Address,
+    match_id: u64,
+    game_id: &str,
+    result: MatchResult,
+) {
+    let oracle_contract_addr: Address = env.as_contract(escrow_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleContract)
+            .unwrap()
+    });
+    let oracle_client = OracleContractClient::new(env, &oracle_contract_addr);
+    oracle_client.submit_result(&match_id, &String::from_str(env, game_id), &result);
+
+    let escrow_client = EscrowContractClient::new(env, escrow_id);
+    escrow_client.submit_result(&match_id, oracle_service);
 }
 
 // ---------------------------------------------------------------------------
@@ -111,7 +140,7 @@ fn test_e2e_lifecycle_player1_wins() {
     assert_eq!(token_client.balance(&player2), 1_000 - stake);
 
     // -- Step 4: Oracle submits result -- Player 1 wins ----------------------
-    client.submit_result(&match_id, &game_id, &Winner::Player1, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-game-p1-wins", MatchResult::Player1Wins);
 
     // Capture events immediately after submit_result, before any other calls
     let events = env.events().all();
@@ -177,7 +206,7 @@ fn test_e2e_lifecycle_player2_wins() {
     assert!(client.is_funded(&match_id));
 
     // -- Oracle submits result -- Player 2 wins ------------------------------
-    client.submit_result(&match_id, &game_id, &Winner::Player2, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-game-p2-wins", MatchResult::Player2Wins);
 
     // Capture events immediately after submit_result
     let events = env.events().all();
@@ -241,7 +270,7 @@ fn test_e2e_lifecycle_draw() {
     assert!(client.is_funded(&match_id));
 
     // -- Oracle submits result -- Draw ----------------------------------------
-    client.submit_result(&match_id, &game_id, &Winner::Draw, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-game-draw", MatchResult::Draw);
 
     // Capture events immediately after submit_result
     let events = env.events().all();
@@ -294,12 +323,7 @@ fn test_e2e_all_three_outcomes_sequential() {
     client.deposit(&id0, &player2);
     assert_eq!(client.get_match(&id0).state, MatchState::Active);
 
-    client.submit_result(
-        &id0,
-        &String::from_str(&env, "seq-game-0"),
-        &Winner::Player1,
-        &oracle,
-    );
+    oracle_submit_e2e(&env, &contract_id, &oracle, id0, "seq-game-0", MatchResult::Player1Wins);
     assert_eq!(client.get_match(&id0).state, MatchState::Completed);
     // After match 0: p1 = 1000 + 100 = 1100, p2 = 1000 - 100 = 900
     assert_eq!(token_client.balance(&player1), 1_100);
@@ -318,12 +342,7 @@ fn test_e2e_all_three_outcomes_sequential() {
     client.deposit(&id1, &player2);
     assert_eq!(client.get_match(&id1).state, MatchState::Active);
 
-    client.submit_result(
-        &id1,
-        &String::from_str(&env, "seq-game-1"),
-        &Winner::Player2,
-        &oracle,
-    );
+    oracle_submit_e2e(&env, &contract_id, &oracle, id1, "seq-game-1", MatchResult::Player2Wins);
     assert_eq!(client.get_match(&id1).state, MatchState::Completed);
     // After match 1: p1 = 1100 - 100 = 1000, p2 = 900 + 100 = 1000
     assert_eq!(token_client.balance(&player1), 1_000);
@@ -342,12 +361,7 @@ fn test_e2e_all_three_outcomes_sequential() {
     client.deposit(&id2, &player2);
     assert_eq!(client.get_match(&id2).state, MatchState::Active);
 
-    client.submit_result(
-        &id2,
-        &String::from_str(&env, "seq-game-2"),
-        &Winner::Draw,
-        &oracle,
-    );
+    oracle_submit_e2e(&env, &contract_id, &oracle, id2, "seq-game-2", MatchResult::Draw);
     assert_eq!(client.get_match(&id2).state, MatchState::Completed);
     // After draw: both players back to 1000
     assert_eq!(token_client.balance(&player1), 1_000);
@@ -388,7 +402,7 @@ fn test_e2e_unauthorized_oracle_rejected() {
 
     let impostor = Address::generate(&env);
     assert_eq!(
-        client.try_submit_result(&match_id, &game_id, &Winner::Player1, &impostor),
+        client.try_submit_result(&match_id, &impostor),
         Err(Ok(Error::Unauthorized))
     );
 
@@ -421,8 +435,16 @@ fn test_e2e_game_id_mismatch_rejected() {
     client.deposit(&match_id, &player1);
     client.deposit(&match_id, &player2);
 
+    // Submit a result to the oracle contract for the wrong game_id.
+    // The escrow must detect the mismatch and return GameIdMismatch.
+    let oracle_contract_addr: Address = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::OracleContract).unwrap()
+    });
+    let oracle_client = OracleContractClient::new(&env, &oracle_contract_addr);
+    oracle_client.submit_result(&match_id, &wrong_game_id, &MatchResult::Player1Wins);
+
     assert_eq!(
-        client.try_submit_result(&match_id, &wrong_game_id, &Winner::Player1, &oracle),
+        client.try_submit_result(&match_id, &oracle),
         Err(Ok(Error::GameIdMismatch))
     );
 
@@ -453,7 +475,7 @@ fn test_e2e_submit_result_on_pending_match_fails() {
 
     // No deposits -- match is still Pending
     assert_eq!(
-        client.try_submit_result(&match_id, &game_id, &Winner::Player1, &oracle),
+        client.try_submit_result(&match_id, &oracle),
         Err(Ok(Error::InvalidState))
     );
 }
@@ -481,14 +503,14 @@ fn test_e2e_no_double_payout_after_completion() {
     );
     client.deposit(&match_id, &player1);
     client.deposit(&match_id, &player2);
-    client.submit_result(&match_id, &game_id, &Winner::Player1, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-double-payout", MatchResult::Player1Wins);
 
     assert_eq!(client.get_match(&match_id).state, MatchState::Completed);
     let p1_balance_after_first = token_client.balance(&player1);
 
-    // Second submit_result must be rejected
+    // Second submit_result must be rejected (escrow is already Completed)
     assert_eq!(
-        client.try_submit_result(&match_id, &game_id, &Winner::Player2, &oracle),
+        client.try_submit_result(&match_id, &oracle),
         Err(Ok(Error::InvalidState))
     );
 
@@ -517,7 +539,7 @@ fn test_e2e_deposit_into_completed_match_fails() {
     );
     client.deposit(&match_id, &player1);
     client.deposit(&match_id, &player2);
-    client.submit_result(&match_id, &game_id, &Winner::Draw, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-dep-completed", MatchResult::Draw);
 
     assert_eq!(
         client.try_deposit(&match_id, &player1),
@@ -578,12 +600,9 @@ fn test_e2e_escrow_balance_full_lifecycle() {
     client.deposit(&match_id, &player2);
     assert_eq!(client.get_escrow_balance(&match_id), stake * 2);
 
-    client.submit_result(&match_id, &game_id, &Winner::Player1, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-balance-lifecycle", MatchResult::Player1Wins);
     assert_eq!(client.get_escrow_balance(&match_id), 0);
 }
-
-// ---------------------------------------------------------------------------
-// Event sequence verification for the full lifecycle
 // ---------------------------------------------------------------------------
 
 /// Confirm that all four expected events are emitted during a complete match
@@ -655,7 +674,7 @@ fn test_e2e_event_sequence_full_lifecycle() {
     assert_eq!(ev_activated_id, match_id);
 
     // Capture "completed" event after oracle submits result
-    client.submit_result(&match_id, &game_id, &Winner::Player1, &oracle);
+    oracle_submit_e2e(&env, &contract_id, &oracle, match_id, "e2e-event-seq", MatchResult::Player1Wins);
     let events_after_submit = env.events().all();
     let completed_topics = vec![
         &env,
@@ -670,4 +689,196 @@ fn test_e2e_event_sequence_full_lifecycle() {
         TryFromVal::try_from_val(&env, &completed_data).unwrap();
     assert_eq!(ev_completed_id, match_id);
     assert_eq!(ev_winner, Winner::Player1);
+}
+
+// ---------------------------------------------------------------------------
+// Issue #179: Oracle-escrow integration — cross-contract result verification
+// ---------------------------------------------------------------------------
+
+/// Full integration test: oracle contract stores result → escrow reads it via
+/// cross-contract call → payout is executed.
+///
+/// This test closes issue #179 by verifying that:
+///   1. The escrow contract reads the result from the oracle contract's
+///      on-chain storage (not from a caller-supplied parameter).
+///   2. The escrow rejects payout if the oracle contract has no result yet
+///      (`OracleResultNotFound`).
+///   3. Once the oracle contract has the result, the escrow executes the
+///      correct payout atomically.
+///   4. The oracle contract's `game_id` is cross-checked against the match's
+///      `game_id` (`GameIdMismatch` if they differ).
+///   5. All three outcomes (Player1 wins, Player2 wins, Draw) work correctly.
+#[test]
+fn test_e2e_oracle_escrow_integration_player1_wins() {
+    let (env, contract_id, oracle_service, player1, player2, token, _admin) = setup_e2e();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+
+    let stake: i128 = 500;
+    let game_id_str = "integration-game-p1";
+    let game_id = String::from_str(&env, game_id_str);
+
+    // Retrieve the oracle contract address stored in the escrow
+    let oracle_contract_addr: Address = env.as_contract(&contract_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::OracleContract)
+            .unwrap()
+    });
+    let oracle_client = OracleContractClient::new(&env, &oracle_contract_addr);
+
+    // -- Step 1: Create match and fund it ------------------------------------
+    let match_id = client.create_match(
+        &player1, &player2, &stake, &token, &game_id, &Platform::Lichess,
+    );
+    client.deposit(&match_id, &player1);
+    client.deposit(&match_id, &player2);
+    assert_eq!(client.get_match(&match_id).state, MatchState::Active);
+
+    // -- Step 2: Escrow rejects payout if oracle has no result yet -----------
+    assert_eq!(
+        client.try_submit_result(&match_id, &oracle_service),
+        Err(Ok(Error::OracleResultNotFound)),
+        "escrow must reject payout when oracle contract has no result yet"
+    );
+    // Match must remain Active — no payout occurred
+    assert_eq!(client.get_match(&match_id).state, MatchState::Active);
+    assert_eq!(token_client.balance(&player1), 1_000 - stake);
+    assert_eq!(token_client.balance(&player2), 1_000 - stake);
+
+    // -- Step 3: Oracle service commits result to oracle contract ------------
+    oracle_client.submit_result(&match_id, &game_id, &MatchResult::Player1Wins);
+    assert!(oracle_client.has_result(&match_id));
+    assert_eq!(oracle_client.get_result(&match_id).result, MatchResult::Player1Wins);
+
+    // -- Step 4: Escrow reads oracle result and executes payout --------------
+    client.submit_result(&match_id, &oracle_service);
+
+    // Player1 wins: receives 2x stake; player2 loses their stake
+    assert_eq!(token_client.balance(&player1), 1_000 + stake);
+    assert_eq!(token_client.balance(&player2), 1_000 - stake);
+    assert_eq!(client.get_match(&match_id).state, MatchState::Completed);
+    assert_eq!(client.get_escrow_balance(&match_id), 0);
+}
+
+#[test]
+fn test_e2e_oracle_escrow_integration_player2_wins() {
+    let (env, contract_id, oracle_service, player1, player2, token, _admin) = setup_e2e();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+
+    let stake: i128 = 300;
+    let game_id = String::from_str(&env, "integration-game-p2");
+
+    let oracle_contract_addr: Address = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::OracleContract).unwrap()
+    });
+    let oracle_client = OracleContractClient::new(&env, &oracle_contract_addr);
+
+    let match_id = client.create_match(
+        &player1, &player2, &stake, &token, &game_id, &Platform::ChessDotCom,
+    );
+    client.deposit(&match_id, &player1);
+    client.deposit(&match_id, &player2);
+
+    oracle_client.submit_result(&match_id, &game_id, &MatchResult::Player2Wins);
+    client.submit_result(&match_id, &oracle_service);
+
+    assert_eq!(token_client.balance(&player2), 1_000 + stake);
+    assert_eq!(token_client.balance(&player1), 1_000 - stake);
+    assert_eq!(client.get_match(&match_id).state, MatchState::Completed);
+}
+
+#[test]
+fn test_e2e_oracle_escrow_integration_draw() {
+    let (env, contract_id, oracle_service, player1, player2, token, _admin) = setup_e2e();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+
+    let stake: i128 = 200;
+    let game_id = String::from_str(&env, "integration-game-draw");
+
+    let oracle_contract_addr: Address = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::OracleContract).unwrap()
+    });
+    let oracle_client = OracleContractClient::new(&env, &oracle_contract_addr);
+
+    let match_id = client.create_match(
+        &player1, &player2, &stake, &token, &game_id, &Platform::Lichess,
+    );
+    client.deposit(&match_id, &player1);
+    client.deposit(&match_id, &player2);
+
+    oracle_client.submit_result(&match_id, &game_id, &MatchResult::Draw);
+    client.submit_result(&match_id, &oracle_service);
+
+    // Draw: both players get their stake back
+    assert_eq!(token_client.balance(&player1), 1_000);
+    assert_eq!(token_client.balance(&player2), 1_000);
+    assert_eq!(client.get_match(&match_id).state, MatchState::Completed);
+    assert_eq!(client.get_escrow_balance(&match_id), 0);
+}
+
+/// Verify that the escrow cross-checks the oracle result's game_id against the
+/// match's game_id.  If the oracle committed a result for a different game_id
+/// (e.g. due to a match_id collision), the escrow must reject with GameIdMismatch.
+#[test]
+fn test_e2e_oracle_game_id_mismatch_rejected() {
+    let (env, contract_id, oracle_service, player1, player2, token, _admin) = setup_e2e();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let oracle_contract_addr: Address = env.as_contract(&contract_id, || {
+        env.storage().instance().get(&DataKey::OracleContract).unwrap()
+    });
+    let oracle_client = OracleContractClient::new(&env, &oracle_contract_addr);
+
+    // Create match with game_id "real-game"
+    let match_id = client.create_match(
+        &player1, &player2, &100, &token,
+        &String::from_str(&env, "real-game"), &Platform::Lichess,
+    );
+    client.deposit(&match_id, &player1);
+    client.deposit(&match_id, &player2);
+
+    // Oracle commits a result for a *different* game_id under the same match_id
+    oracle_client.submit_result(
+        &match_id,
+        &String::from_str(&env, "wrong-game"),
+        &MatchResult::Player1Wins,
+    );
+
+    // Escrow must detect the mismatch and reject
+    assert_eq!(
+        client.try_submit_result(&match_id, &oracle_service),
+        Err(Ok(Error::GameIdMismatch))
+    );
+    assert_eq!(client.get_match(&match_id).state, MatchState::Active);
+}
+
+/// Verify that the escrow rejects payout when the oracle contract has no result
+/// for the given match_id, returning OracleResultNotFound.
+#[test]
+fn test_e2e_oracle_result_not_found_rejected() {
+    let (env, contract_id, oracle_service, player1, player2, token, _admin) = setup_e2e();
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let token_client = TokenClient::new(&env, &token);
+
+    let stake: i128 = 150;
+    let match_id = client.create_match(
+        &player1, &player2, &stake, &token,
+        &String::from_str(&env, "no-oracle-result"), &Platform::Lichess,
+    );
+    client.deposit(&match_id, &player1);
+    client.deposit(&match_id, &player2);
+
+    // Oracle has NOT submitted a result yet
+    assert_eq!(
+        client.try_submit_result(&match_id, &oracle_service),
+        Err(Ok(Error::OracleResultNotFound))
+    );
+
+    // Match must remain Active and balances unchanged
+    assert_eq!(client.get_match(&match_id).state, MatchState::Active);
+    assert_eq!(token_client.balance(&player1), 1_000 - stake);
+    assert_eq!(token_client.balance(&player2), 1_000 - stake);
 }

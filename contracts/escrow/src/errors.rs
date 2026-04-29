@@ -86,6 +86,11 @@ pub enum Error {
 
     /// [E017] Deposit rejected because the match has already completed.
     MatchCompleted = 17,
+
+    /// [E018] Oracle contract has no result for this match_id yet.
+    /// The oracle service must call oracle_contract.submit_result() before
+    /// the escrow can finalise the match.
+    OracleResultNotFound = 18,
 }
 
 impl core::fmt::Display for Error {
@@ -125,6 +130,8 @@ impl core::fmt::Display for Error {
                 write!(f, "[E016] MatchCancelled: deposit rejected — match has been cancelled"),
             Error::MatchCompleted =>
                 write!(f, "[E017] MatchCompleted: deposit rejected — match has already completed"),
+            Error::OracleResultNotFound =>
+                write!(f, "[E018] OracleResultNotFound: oracle contract has no result for this match_id yet"),
         }
     }
 }

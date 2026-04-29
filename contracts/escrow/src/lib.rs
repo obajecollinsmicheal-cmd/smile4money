@@ -4,6 +4,8 @@ mod errors;
 mod types;
 
 use errors::Error;
+use smile4money_oracle::OracleContractClient;
+use smile4money_oracle::types::MatchResult;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Symbol};
 use types::{DataKey, Match, MatchState, Platform, Winner};
 
@@ -26,8 +28,10 @@ impl EscrowContract {
     }
 
     /// Initialize the contract with a trusted oracle address, an admin, and a default token.
+    /// `oracle` is the off-chain oracle service address (authorized to call submit_result).
+    /// `oracle_contract` is the on-chain oracle contract address used to verify results.
     /// Returns `Error::InvalidToken` if the token address is not a valid token contract.
-    pub fn initialize(env: Env, oracle: Address, admin: Address, token: Address) -> Result<(), Error> {
+    pub fn initialize(env: Env, oracle: Address, oracle_contract: Address, admin: Address, token: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Oracle) {
             panic!("Contract already initialized");
         }
@@ -35,6 +39,7 @@ impl EscrowContract {
         let token_client = token::Client::new(&env, &token);
         let _ = token_client.decimals();
         env.storage().instance().set(&DataKey::Oracle, &oracle);
+        env.storage().instance().set(&DataKey::OracleContract, &oracle_contract);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
         env.storage().instance().set(&DataKey::MatchCount, &0u64);
@@ -258,13 +263,24 @@ impl EscrowContract {
         Ok(())
     }
 
-    /// Oracle submits the verified match result and triggers payout.
-    /// `game_id` must match the game_id stored in the match to prevent cross-match result injection.
+    /// Oracle service triggers payout by providing its caller address.
+    ///
+    /// The escrow contract reads the verified result directly from the oracle
+    /// contract's on-chain storage, ensuring the result was committed there
+    /// before any payout is executed.  This closes the silo between the two
+    /// contracts: the oracle contract is now the single source of truth.
+    ///
+    /// Flow:
+    ///   1. Verify `caller` == registered oracle service address.
+    ///   2. Load the match and validate state / game_id.
+    ///   3. Call `oracle_contract.get_result(match_id)` — returns
+    ///      `OracleResultNotFound` if the oracle has not yet committed a result.
+    ///   4. Cross-check the oracle's `game_id` against the match's `game_id`
+    ///      (double-guard against cross-match injection).
+    ///   5. Execute payout based on the oracle's `MatchResult`.
     pub fn submit_result(
         env: Env,
         match_id: u64,
-        game_id: String,
-        winner: Winner,
         caller: Address,
     ) -> Result<(), Error> {
         if Self::is_paused(&env) {
@@ -288,11 +304,6 @@ impl EscrowContract {
             .get(&DataKey::Match(match_id))
             .ok_or(Error::MatchNotFound)?;
 
-        // Verify the oracle is submitting a result for the correct game
-        if m.game_id != game_id {
-            return Err(Error::GameIdMismatch);
-        }
-
         if m.state != MatchState::Active {
             return Err(Error::InvalidState);
         }
@@ -300,6 +311,34 @@ impl EscrowContract {
         if !m.player1_deposited || !m.player2_deposited {
             return Err(Error::NotFunded);
         }
+
+        // --- Cross-contract read: fetch result from oracle contract ----------
+        let oracle_contract_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::OracleContract)
+            .ok_or(Error::Unauthorized)?;
+
+        let oracle_client = OracleContractClient::new(&env, &oracle_contract_addr);
+        let result_entry = oracle_client
+            .try_get_result(&match_id)
+            .map_err(|_| Error::OracleResultNotFound)?
+            .map_err(|_| Error::OracleResultNotFound)?;
+
+        // Verify the oracle result's game_id matches the match's game_id.
+        // This is a second line of defence against cross-match result injection
+        // (the oracle contract already guards this on its side, but we verify
+        // independently so neither contract has to trust the other blindly).
+        if m.game_id != result_entry.game_id {
+            return Err(Error::GameIdMismatch);
+        }
+
+        // Map oracle MatchResult → escrow Winner
+        let winner = match result_entry.result {
+            MatchResult::Player1Wins => Winner::Player1,
+            MatchResult::Player2Wins => Winner::Player2,
+            MatchResult::Draw => Winner::Draw,
+        };
 
         let client = token::Client::new(&env, &m.token);
 

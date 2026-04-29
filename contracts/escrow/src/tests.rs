@@ -1027,8 +1027,9 @@ fn test_cancel_match_emits_event() {
     assert!(matched.is_some());
 
     let (_, _, data) = matched.unwrap();
-    let ev_id: u64 = TryFromVal::try_from_val(&env, &data).unwrap();
+    let (ev_id, ev_cancelled_by): (u64, Address) = TryFromVal::try_from_val(&env, &data).unwrap();
     assert_eq!(ev_id, id);
+    assert_eq!(ev_cancelled_by, player1);
 }
 
 // Issue #59: Test that pause() prevents match creation

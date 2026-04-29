@@ -428,7 +428,7 @@ impl EscrowContract {
 
         env.events().publish(
             (Symbol::new(&env, "match"), symbol_short!("cancelled")),
-            match_id,
+            (match_id, caller.clone()),
         );
 
         Ok(())

@@ -64,9 +64,10 @@ impl OracleContract {
             MATCH_TTL_LEDGERS,
         );
 
+        let timestamp = env.ledger().timestamp();
         env.events().publish(
             (Symbol::new(&env, "oracle"), symbol_short!("result")),
-            (match_id, result),
+            (match_id, result, timestamp),
         );
 
         Ok(())
@@ -295,5 +296,65 @@ mod tests {
         ];
         let matched = events.iter().find(|(_, t, _)| *t == topics);
         assert!(matched.is_some());
+    }
+
+    /// Verifies that `submit_result` emits an event with the correct topics
+    /// `(Symbol("oracle"), Symbol("result"))` and payload `(match_id, result, timestamp)`
+    /// for every possible `MatchResult` variant.
+    #[test]
+    fn test_oracle_submit_result_emits_event() {
+        let result_topic = vec![
+            &Env::default(), // placeholder; real env built per case
+        ];
+        let _ = result_topic; // silence unused warning; real assertions below
+
+        let cases: &[(u64, MatchResult)] = &[
+            (1u64, MatchResult::Player1Wins),
+            (2u64, MatchResult::Player2Wins),
+            (3u64, MatchResult::Draw),
+        ];
+
+        for (match_id, expected_result) in cases {
+            let env = Env::default();
+            env.mock_all_auths();
+            let admin = Address::generate(&env);
+            let contract_id = env.register(OracleContract, ());
+            let client = OracleContractClient::new(&env, &contract_id);
+            client.initialize(&admin);
+
+            client.submit_result(
+                match_id,
+                &String::from_str(&env, "game_abc"),
+                expected_result,
+            );
+
+            let expected_topics = vec![
+                &env,
+                Symbol::new(&env, "oracle").into_val(&env),
+                soroban_sdk::symbol_short!("result").into_val(&env),
+            ];
+
+            let timestamp = env.ledger().timestamp();
+            let expected_data: soroban_sdk::Val =
+                (*match_id, expected_result.clone(), timestamp).into_val(&env);
+
+            let events = env.events().all();
+            let matched = events
+                .iter()
+                .find(|(_, topics, _)| *topics == expected_topics);
+
+            assert!(
+                matched.is_some(),
+                "No result event emitted for variant {:?}",
+                expected_result
+            );
+
+            let (_, _, actual_data) = matched.unwrap();
+            assert_eq!(
+                actual_data, expected_data,
+                "Event data mismatch for variant {:?}",
+                expected_result
+            );
+        }
     }
 }

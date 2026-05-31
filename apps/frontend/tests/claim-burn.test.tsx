@@ -4,7 +4,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ClaimBurn } from '../src/components/claim-burn';
 
 // Mock CSS import
-vi.mock('../src/components/claim-burn.css', () => ({}));
+vi.mock('../src/styles/claim-burn.css', () => ({}));
 
 describe('ClaimBurn — wallet states', () => {
   it('shows checking/connecting spinner while loading', () => {

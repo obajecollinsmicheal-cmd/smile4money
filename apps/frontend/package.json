@@ -11,17 +11,22 @@
     "lint": "tsc --noEmit"
   },
   "dependencies": {
+    "autoprefixer": "^10.5.0",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
     "@testing-library/jest-dom": "^6.4.6",
     "@testing-library/react": "^16.0.0",
     "@testing-library/user-event": "^14.5.2",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
+    "autoprefixer": "^10.5.0",
     "jsdom": "^24.1.0",
+    "tailwindcss": "^4.3.0",
     "typescript": "^5.5.3",
     "vite": "^5.3.4",
     "vitest": "^2.0.3"

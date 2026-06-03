@@ -541,6 +541,8 @@ fn test_submit_result_wrong_game_id_fails() {
 
 #[test]
 #[should_panic(expected = "Contract already initialized")]
+/// Issue #110 / Issue #1: a second call to initialize must panic to prevent
+/// an attacker from overwriting the oracle and admin addresses post-deployment.
 fn test_double_initialize_fails() {
     let env = Env::default();
     env.mock_all_auths();

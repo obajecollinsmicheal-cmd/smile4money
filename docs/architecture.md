@@ -87,10 +87,14 @@ All persistent entries are written with a TTL of `518_400` ledgers (~30 days at 
 
 | Contract | Topics | Data |
 |----------|--------|------|
-| Escrow | `("match", "created")` | `(match_id, player1, player2, stake_amount)` |
+| Escrow | `("match", "created")` | `(match_id, player1, player2, stake_amount, game_id)` |
 | Escrow | `("match", "activated")` | `match_id` |
-| Escrow | `("match", "completed")` | `(match_id, winner)` |
-| Escrow | `("match", "cancelled")` | `match_id` |
+| Escrow | `("match", "deposit")` | `(match_id, player, stake_amount)` |
+| Escrow | `("match", "completed")` | `(match_id, winner, payout_amount)` |
+| Escrow | `("match", "cancelled")` | `(match_id, caller)` |
 | Escrow | `("admin", "paused")` | `()` |
 | Escrow | `("admin", "unpaused")` | `()` |
-| Oracle | `("oracle", "result")` | `(match_id, result)` |
+| Escrow | `("admin", "oracle")` | `new_oracle` |
+| Oracle | `("oracle", "init")` | `admin` |
+| Oracle | `("oracle", "result")` | `(match_id, result, timestamp)` |
+| Oracle | `("oracle", "adm_xfer")` | `(old_admin, new_admin)` |

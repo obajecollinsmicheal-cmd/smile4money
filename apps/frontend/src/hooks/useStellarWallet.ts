@@ -1,6 +1,8 @@
 import { useState, useCallback, useEffect } from 'react';
 import type { WalletStatus, Network } from '../types';
 
+const EXPECTED_NETWORK = (typeof import.meta !== 'undefined' && (import.meta as { env?: { VITE_STELLAR_NETWORK?: string } }).env?.VITE_STELLAR_NETWORK) || 'testnet';
+
 declare global {
   interface Window {
     freighterApi?: {
@@ -109,7 +111,11 @@ export function useStellarWallet(): StellarWallet {
         setNetwork(detectedNetwork);
       }
 
-      setStatus('connected');
+      if (detectedNetwork !== 'unknown' && detectedNetwork !== EXPECTED_NETWORK) {
+        setStatus('wrongNetwork');
+      } else {
+        setStatus('connected');
+      }
 
       fetchHorizonBalance(publicKey, detectedNetwork)
         .then((bal) => setBalance(bal))

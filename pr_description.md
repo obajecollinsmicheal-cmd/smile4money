@@ -57,4 +57,4 @@ This PR builds the `claim-burn.tsx` component with a modern, accessible UI that 
 feat: add claim/burn UI and wallet states
 ```
 
-Closes issue #360
+Closes issue #96

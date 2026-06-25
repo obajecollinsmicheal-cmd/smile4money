@@ -235,6 +235,36 @@ mod tests {
     }
 
     #[test]
+    fn test_submit_result_by_non_admin_returns_unauthorized() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let contract_id = env.register(OracleContract, ());
+        let client = OracleContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "submit_result",
+                args: (1u64, String::from_str(&env, "game1"), MatchResult::Player1Wins)
+                    .into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert!(
+            client
+                .try_submit_result(&1u64, &String::from_str(&env, "game1"), &MatchResult::Player1Wins)
+                .is_err(),
+            "non-admin must not be able to submit results"
+        );
+        assert!(!client.has_result(&1u64), "result must not be stored after rejected submission");
+    }
+
+    #[test]
     fn test_double_initialize_fails() {
         let env = Env::default();
         env.mock_all_auths();

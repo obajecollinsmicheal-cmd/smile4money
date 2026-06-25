@@ -87,6 +87,33 @@ impl OracleContract {
         env.storage().persistent().has(&DataKey::Result(match_id))
     }
 
+    /// Admin deletes a mis-submitted result before the escrow contract processes it.
+    pub fn delete_result(env: Env, match_id: u64, caller: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+        caller.require_auth();
+
+        if !env.storage().persistent().has(&DataKey::Result(match_id)) {
+            return Err(Error::ResultNotFound);
+        }
+
+        env.storage().persistent().remove(&DataKey::Result(match_id));
+
+        env.events().publish(
+            (Symbol::new(&env, "oracle"), symbol_short!("res_del")),
+            (match_id, caller),
+        );
+
+        Ok(())
+    }
+
     /// Transfer admin rights to a new address. Requires current admin auth.
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         let admin: Address = env
@@ -267,6 +294,77 @@ mod tests {
             soroban_sdk::symbol_short!("adm_xfer").into_val(&env),
         ];
         assert!(events.iter().any(|(_, t, _)| t == topics));
+    }
+
+    #[test]
+    fn test_delete_result_authorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(OracleContract, ());
+        let client = OracleContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        client.submit_result(&42u64, &String::from_str(&env, "game42"), &MatchResult::Draw);
+        assert!(client.has_result(&42u64));
+
+        client.delete_result(&42u64, &admin);
+
+        // Capture events immediately — env.events().all() returns events from
+        // the most recent invocation, so this must come before the next client call.
+        let events = env.events().all();
+        let topics = vec![
+            &env,
+            Symbol::new(&env, "oracle").into_val(&env),
+            soroban_sdk::symbol_short!("res_del").into_val(&env),
+        ];
+        assert!(events.iter().any(|(_, t, _)| t == topics));
+
+        assert!(!client.has_result(&42u64));
+    }
+
+    #[test]
+    fn test_delete_result_unauthorized() {
+        let env = Env::default();
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let contract_id = env.register(OracleContract, ());
+        let client = OracleContractClient::new(&env, &contract_id);
+        env.mock_all_auths();
+        client.initialize(&admin);
+        client.submit_result(&10u64, &String::from_str(&env, "game10"), &MatchResult::Player1Wins);
+
+        use soroban_sdk::testutils::{MockAuth, MockAuthInvoke};
+        env.mock_auths(&[MockAuth {
+            address: &non_admin,
+            invoke: &MockAuthInvoke {
+                contract: &contract_id,
+                fn_name: "delete_result",
+                args: (10u64, non_admin.clone()).into_val(&env),
+                sub_invokes: &[],
+            },
+        }]);
+
+        assert_eq!(
+            client.try_delete_result(&10u64, &non_admin),
+            Err(Ok(Error::Unauthorized))
+        );
+        assert!(client.has_result(&10u64));
+    }
+
+    #[test]
+    fn test_delete_result_not_found() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let contract_id = env.register(OracleContract, ());
+        let client = OracleContractClient::new(&env, &contract_id);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client.try_delete_result(&999u64, &admin),
+            Err(Ok(Error::ResultNotFound))
+        );
     }
 
     #[test]

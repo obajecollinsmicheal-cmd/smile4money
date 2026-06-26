@@ -29,7 +29,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: |
             ~/.cargo/registry
@@ -57,7 +57,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: |
             ~/.cargo/registry
@@ -86,7 +86,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: |
             ~/.cargo/registry
@@ -125,7 +125,7 @@ jobs:
           components: clippy
 
       - name: Cache cargo
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: |
             ~/.cargo/registry
@@ -187,7 +187,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Cache cargo
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: |
             ~/.cargo/registry
@@ -238,7 +238,7 @@ jobs:
           node-version: "20"
 
       - name: Cache node_modules
-        uses: actions/cache@6f8efc29b200d32929f49075959781ed54ec270c # v3
+        uses: actions/cache@2c8a9bd7457de244a408f35966fab2fb45fda9c8 # v6.0.0
         with:
           path: apps/frontend/node_modules
           key: ${{ runner.os }}-node-${{ hashFiles('apps/frontend/package-lock.json') }}

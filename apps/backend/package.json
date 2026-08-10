@@ -29,7 +29,7 @@
     "@types/supertest": "2.0.16",
     "@types/sqlite3": "3.1.11",
     "mongodb-memory-server": "9.5.0",
-    "mongoose": "8.24.1",
+    "mongoose": "9.9.1",
     "prettier": "3.8.4",
     "stellar-sdk": "10.3.0",
     "supertest": "6.3.4",

@@ -67,6 +67,31 @@ const MAX_GAME_ID_LEN: u32 = 64;
 /// Maximum number of entries returned by list_results in a single call.
 const MAX_LIST_LIMIT: u32 = 100;
 
+/// Validate that every byte of `game_id` belongs to the set `[A-Za-z0-9_-]`.
+///
+/// This enforces printable ASCII and prevents null bytes, control characters,
+/// whitespace, and non-ASCII sequences from entering persistent storage.
+/// The allowed set mirrors both the identifier format used by Lichess and
+/// Chess.com and the identical check performed by the escrow contract, ensuring
+/// the two contracts always agree on what constitutes a valid `game_id`.
+///
+/// The string is copied into a fixed 64-byte stack buffer — the same size as
+/// `MAX_GAME_ID_LEN` — so no heap allocation is required inside the WASM guest.
+fn is_valid_game_id(game_id: &String) -> bool {
+    let len = game_id.len() as usize;
+    // Safety: len is already validated to be in [1, MAX_GAME_ID_LEN].
+    let mut buf = [0u8; MAX_GAME_ID_LEN as usize];
+    game_id.copy_into_slice(&mut buf[..len]);
+    for i in 0..len {
+        let b = buf[i];
+        let ok = b.is_ascii_alphanumeric() || b == b'_' || b == b'-';
+        if !ok {
+            return false;
+        }
+    }
+    true
+}
+
 #[contract]
 pub struct OracleContract;
 
@@ -111,14 +136,16 @@ impl OracleContract {
     ///
     /// * `match_id` — The escrow match ID this result belongs to.
     /// * `game_id`  — The platform-specific game identifier (e.g. Lichess game ID). Must be
-    ///   non-empty and at most 64 bytes.
+    ///   non-empty, at most 64 bytes, and contain only `[A-Za-z0-9_-]` characters.
     /// * `result`   — The outcome: [`MatchResult::Player1Wins`], [`MatchResult::Player2Wins`],
     ///   or [`MatchResult::Draw`].
     ///
     /// # Errors
     ///
     /// * [`Error::Unauthorized`]     — Caller is not the registered admin.
-    /// * [`Error::InvalidGameId`]    — `game_id` is empty or exceeds 64 bytes.
+    /// * [`Error::InvalidGameId`]    — `game_id` is empty, exceeds 64 bytes, or contains
+    ///   characters outside `[A-Za-z0-9_-]` (null bytes, control characters, whitespace,
+    ///   non-ASCII sequences, etc.).
     /// * [`Error::AlreadySubmitted`] — A result already exists for this `match_id`.
     pub fn submit_result(
         env: Env,
@@ -135,6 +162,16 @@ impl OracleContract {
 
         let game_id_len = game_id.len();
         if game_id_len == 0 || game_id_len > MAX_GAME_ID_LEN {
+            return Err(Error::InvalidGameId);
+        }
+
+        // Enforce printable ASCII: only [A-Za-z0-9_-] are accepted.
+        // This mirrors the identical check in the escrow contract and closes the
+        // gap where a caller could submit a game_id containing null bytes, control
+        // characters, or non-ASCII sequences that would pass the length check but
+        // permanently diverge from the escrow's stored game_id, causing an
+        // irrecoverable GameIdMismatch that locks player funds.
+        if !is_valid_game_id(&game_id) {
             return Err(Error::InvalidGameId);
         }
 
@@ -762,6 +799,106 @@ mod tests {
             client.try_submit_result(&1u64, &long_game_id, &MatchResult::Player1Wins),
             Err(Ok(Error::InvalidGameId))
         ));
+    }
+
+    // ── Issue #1512: game_id character-set validation ─────────────────────────
+
+    #[test]
+    fn submit_result_game_id_with_null_byte_returns_invalid() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        // Null byte — would brick the escrow match with GameIdMismatch if stored.
+        let bad_id = String::from_str(&env, "abc\x00def");
+        assert_eq!(
+            client.try_submit_result(&1u64, &bad_id, &MatchResult::Player1Wins),
+            Err(Ok(Error::InvalidGameId)),
+            "null byte in game_id must be rejected"
+        );
+    }
+
+    #[test]
+    fn submit_result_game_id_with_space_returns_invalid() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        let bad_id = String::from_str(&env, "abc def");
+        assert_eq!(
+            client.try_submit_result(&1u64, &bad_id, &MatchResult::Player1Wins),
+            Err(Ok(Error::InvalidGameId)),
+            "space in game_id must be rejected"
+        );
+    }
+
+    #[test]
+    fn submit_result_game_id_with_slash_returns_invalid() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        let bad_id = String::from_str(&env, "abc/def");
+        assert_eq!(
+            client.try_submit_result(&1u64, &bad_id, &MatchResult::Player1Wins),
+            Err(Ok(Error::InvalidGameId)),
+            "slash in game_id must be rejected"
+        );
+    }
+
+    #[test]
+    fn submit_result_game_id_with_at_symbol_returns_invalid() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        let bad_id = String::from_str(&env, "abc@def");
+        assert_eq!(
+            client.try_submit_result(&1u64, &bad_id, &MatchResult::Player1Wins),
+            Err(Ok(Error::InvalidGameId)),
+            "@ in game_id must be rejected"
+        );
+    }
+
+    #[test]
+    fn submit_result_game_id_valid_charset_accepted() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        // All allowed character classes: uppercase, lowercase, digits, underscore, hyphen.
+        let valid_id = String::from_str(&env, "AbcXyz-012_ABC");
+        assert!(
+            client
+                .try_submit_result(&1u64, &valid_id, &MatchResult::Player1Wins)
+                .is_ok(),
+            "valid [A-Za-z0-9_-] game_id must be accepted"
+        );
+    }
+
+    #[test]
+    fn submit_result_game_id_single_char_accepted() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        // Minimum valid length: 1 byte from the allowed set.
+        let valid_id = String::from_str(&env, "a");
+        assert!(
+            client
+                .try_submit_result(&2u64, &valid_id, &MatchResult::Draw)
+                .is_ok(),
+            "single allowed char must be accepted"
+        );
+    }
+
+    #[test]
+    fn submit_result_game_id_max_length_valid_charset_accepted() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        // 64 bytes of allowed characters — sits exactly on the length boundary.
+        let valid_id = String::from_str(&env, &"a".repeat(64));
+        assert!(
+            client
+                .try_submit_result(&3u64, &valid_id, &MatchResult::Player2Wins)
+                .is_ok(),
+            "64-char valid game_id must be accepted"
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use soroban_sdk::contracterror;
 /// |  2   | AlreadySubmitted   | A result has already been recorded for this match_id     |
 /// |  3   | ResultNotFound     | No result has been submitted for the given match_id      |
 /// |  4   | AlreadyInitialized | Contract has already been initialized                    |
-/// |  5   | InvalidGameId      | game_id is empty or exceeds the 64-byte maximum          |
+/// |  5   | InvalidGameId      | game_id is empty, exceeds 64 bytes, or contains chars outside [A-Za-z0-9_-] |
 /// |  6   | TransferFailed     | Token transfer in withdraw failed                        |
 /// |  7   | InvalidAmount      | withdraw amount must be greater than zero               |
 #[contracterror]
@@ -34,7 +34,9 @@ pub enum Error {
     /// [E004] `initialize` has already been called; the contract cannot be re-initialized.
     AlreadyInitialized = 4,
 
-    /// [E005] `game_id` is empty or exceeds the 64-byte maximum length.
+    /// [E005] `game_id` is empty, exceeds the 64-byte maximum length, or contains
+    /// characters outside the allowed set `[A-Za-z0-9_-]` (null bytes, control
+    /// characters, whitespace, non-ASCII sequences, etc.).
     InvalidGameId = 5,
 
     /// [E006] Token transfer failed during `withdraw`.

@@ -78,8 +78,8 @@ router.post('/', async (req, res) => {
   if (!player2 || typeof player2 !== 'string') {
     return res.status(400).json({ error: 'player2 is required' });
   }
-  if (typeof stakeAmount !== 'number' || !Number.isFinite(stakeAmount)) {
-    return res.status(400).json({ error: 'stakeAmount must be a number' });
+  if (typeof stakeAmount !== 'number' || !Number.isFinite(stakeAmount) || !Number.isInteger(stakeAmount)) {
+    return res.status(400).json({ error: 'stakeAmount must be a whole number of stroops' });
   }
   if (stakeAmount <= 0 || stakeAmount > Number.MAX_SAFE_INTEGER) {
     return res.status(400).json({ error: 'stakeAmount must be a valid, positive amount' });

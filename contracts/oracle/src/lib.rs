@@ -257,7 +257,11 @@ impl OracleContract {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Unauthorized`] if the current admin has not signed the transaction.
+    /// * [`Error::Unauthorized`]  — The current admin has not signed the transaction, or
+    ///   the contract has not been initialized.
+    /// * [`Error::InvalidAdmin`]  — `new_admin` is the all-zeroes contract address
+    ///   (`CAAAA…AAAD2KM`). That address can never sign, so storing it would permanently
+    ///   brick the contract.
     pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), Error> {
         let admin: Address = env
             .storage()
@@ -265,6 +269,21 @@ impl OracleContract {
             .get(&DataKey::Admin)
             .ok_or(Error::Unauthorized)?;
         admin.require_auth();
+
+        // Reject the zero/burn address. The all-zeroes contract address
+        // (CAAAA...AAAD2KM in strkey encoding) can never sign a transaction.
+        // Storing it as admin would permanently brick the contract — no future
+        // transfer_admin, submit_result, or withdraw call could ever succeed.
+        let zero_addr = Address::from_strkey(
+            &env,
+            &soroban_sdk::String::from_str(
+                &env,
+                "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            ),
+        );
+        if new_admin == zero_addr {
+            return Err(Error::InvalidAdmin);
+        }
 
         // If the new admin is the same as the current admin, treat this as a no-op.
         // Do not update storage or emit an `adm_xfer` event to avoid misleading
@@ -1030,5 +1049,38 @@ mod tests {
         // Starting past the last submitted ID returns nothing.
         let past_end = client.list_results(&11u64, &20u32);
         assert_eq!(past_end.len(), 0);
+    }
+
+    // ── Issue #1513: transfer_admin must reject the zero/burn address ─────────
+
+    #[test]
+    fn test_transfer_admin_zero_address_returns_invalid_admin() {
+        let (env, contract_id) = setup();
+        let client = OracleContractClient::new(&env, &contract_id);
+
+        // The all-zeroes contract address (C-strkey) can never sign a transaction.
+        // Passing it to transfer_admin must return Error::InvalidAdmin so the
+        // contract cannot be permanently bricked.
+        let zero_addr = Address::from_strkey(
+            &env,
+            &String::from_str(
+                &env,
+                "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            ),
+        );
+
+        assert_eq!(
+            client.try_transfer_admin(&zero_addr),
+            Err(Ok(Error::InvalidAdmin)),
+            "transfer_admin must reject the zero address with InvalidAdmin"
+        );
+
+        // Confirm the admin was NOT updated — the contract is still functional.
+        client.submit_result(
+            &0u64,
+            &String::from_str(&env, "game1"),
+            &MatchResult::Player1Wins,
+        );
+        assert!(client.has_result(&0u64), "contract must remain operational after rejected transfer");
     }
 }

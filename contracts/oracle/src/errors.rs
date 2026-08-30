@@ -17,7 +17,8 @@ use soroban_sdk::contracterror;
 /// |  4   | AlreadyInitialized | Contract has already been initialized                    |
 /// |  5   | InvalidGameId      | game_id is empty, exceeds 64 bytes, or contains chars outside [A-Za-z0-9_-] |
 /// |  6   | TransferFailed     | Token transfer in withdraw failed                        |
-/// |  7   | InvalidAmount      | withdraw amount must be greater than zero               |
+/// |  7   | InvalidAmount      | withdraw amount must be greater than zero                |
+/// |  8   | InvalidAdmin       | new_admin is the zero/burn address                       |
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -44,4 +45,8 @@ pub enum Error {
 
     /// [E007] Invalid amount supplied to `withdraw` (amount must be > 0).
     InvalidAmount = 7,
+
+    /// [E008] `new_admin` is the zero/burn address. Storing it would permanently
+    /// brick the contract because the zero address can never sign a transaction.
+    InvalidAdmin = 8,
 }

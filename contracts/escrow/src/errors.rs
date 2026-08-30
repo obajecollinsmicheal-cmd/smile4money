@@ -135,4 +135,8 @@ pub enum Error {
     /// Players must be valid, controlled addresses. Matches created with zero addresses
     /// would result in payout funds being sent to uncontrolled addresses.
     InvalidAddress = 27,
+
+    /// [E028] `override_result` was called after the dispute window expired.
+    /// The pending result can no longer be overridden and should instead be finalized.
+    DisputeWindowExpired = 28,
 }

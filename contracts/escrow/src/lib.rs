@@ -481,7 +481,7 @@ impl EscrowContract {
             player2_deposited: false,
             created_ledger: env.ledger().sequence(),
             activated_ledger: None,
-            pending_result_ledger: 0,
+            pending_result_ledger: None,
             pending_winner: OptionalWinner::None,
             cancelled_ledger: None,
             completed_ledger: None,
@@ -745,10 +745,13 @@ impl EscrowContract {
 
         // Ensure the dispute window has not yet expired; after expiry the result
         // is final and must be processed via finalize_result.
+        let prl = m
+            .pending_result_ledger
+            .ok_or(Error::InvalidState)?;
         let current = env.ledger().sequence();
         let dispute_window = Self::get_dispute_window_ledgers(&env);
-        if current > m.pending_result_ledger + dispute_window {
-            return Err(Error::DisputeWindowActive);
+        if current > prl + dispute_window {
+            return Err(Error::DisputeWindowExpired);
         }
 
         let old_winner = m.pending_winner.clone();
@@ -824,9 +827,12 @@ impl EscrowContract {
             return Err(Error::InvalidState);
         }
 
+        let prl = m
+            .pending_result_ledger
+            .ok_or(Error::InvalidState)?;
         let current = env.ledger().sequence();
         let dispute_window = Self::get_dispute_window_ledgers(&env);
-        if current <= m.pending_result_ledger + dispute_window {
+        if current <= prl + dispute_window {
             return Err(Error::DisputeWindowActive);
         }
 
@@ -923,7 +929,7 @@ impl EscrowContract {
         let activated = m.activated_ledger.ok_or(Error::InvalidState)?;
         let current = env.ledger().sequence();
         let timeout = Self::get_timeout_ledgers(&env);
-        if current <= m.activated_ledger + timeout {
+        if current <= activated + timeout {
             // Timeout period has not elapsed yet — reject with MatchTimedOut reused
             // as "too early". We return MatchTimedOut here to keep error codes minimal;
             // callers should interpret it as "timeout not yet reached".
@@ -939,6 +945,7 @@ impl EscrowContract {
 
         // STATE TRANSITION: Active → Cancelled (via timeout)
         m.state = MatchState::Cancelled;
+        m.cancelled_ledger = Some(env.ledger().sequence());
         env.storage()
             .persistent()
             .set(&DataKey::Match(match_id), &m);

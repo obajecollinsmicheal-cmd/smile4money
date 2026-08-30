@@ -417,12 +417,11 @@ impl EscrowContract {
         if player1 == player2 {
             return Err(Error::InvalidPlayers);
         }
-        // Validate that neither player is the zero/burn address
-        let zero_address = String::from_str(
-            &env,
-            "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-        );
-        if player1.to_string() == zero_address || player2.to_string() == zero_address {
+        // Validate that neither player is the zero/burn address.
+        // Uses the existing is_zero_address helper (XDR-based Address equality)
+        // instead of a string comparison, which is cheaper on compute budget and
+        // robust against any future strkey encoding changes.
+        if is_zero_address(&env, &player1) || is_zero_address(&env, &player2) {
             return Err(Error::InvalidAddress);
         }
         let game_id_len = game_id.len();

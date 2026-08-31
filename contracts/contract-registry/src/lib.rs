@@ -44,6 +44,11 @@ pub struct ContractRegistry;
 const REGISTRATION_TTL_LEDGERS: u32 = 100_000;
 const REGISTRATION_TTL_BUMP: u32 = 50_000;
 
+/// Instance-storage TTL threshold.
+const INSTANCE_LIFETIME_THRESHOLD: u32 = 518_400;
+/// Instance-storage TTL bump amount.
+const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
+
 #[contractimpl]
 impl ContractRegistry {
     pub fn initialize(env: Env, admin: Address, max_events: u32) -> Result<(), Error> {
@@ -60,6 +65,9 @@ impl ContractRegistry {
             .set(&DataKey::RegistrationCount, &0u32);
         env.storage().instance().set(&DataKey::Events, &Vec::<Symbol>::new(&env));
 
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -70,6 +78,9 @@ impl ContractRegistry {
         }
         caller.require_auth();
         env.storage().instance().set(&DataKey::Paused, &true);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -80,6 +91,9 @@ impl ContractRegistry {
         }
         caller.require_auth();
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -119,6 +133,9 @@ impl ContractRegistry {
         env.storage()
             .instance()
             .set(&DataKey::RegistrationCount, &count);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -134,22 +151,9 @@ impl ContractRegistry {
         if !env.storage().persistent().has(&key) {
             return Err(Error::ContractNotFound);
         }
-        // Perform an explicit update: refresh the registration TTL and ensure
-        // the record remains active. This makes `update_contract` a meaningful
-        // administrative operation (bump/refresh) instead of a silent no-op.
-        let mut record: ContractRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .ok_or(Error::ContractNotFound)?;
-        // Ensure the registration is marked active after update.
-        record.active = true;
-        env.storage().persistent().set(&key, &record);
-        env.storage().persistent().extend_ttl(
-            &key,
-            REGISTRATION_TTL_LEDGERS,
-            REGISTRATION_TTL_BUMP,
-        );
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -180,6 +184,9 @@ impl ContractRegistry {
         env.storage()
             .instance()
             .set(&DataKey::RegistrationCount, &count);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -218,6 +225,9 @@ impl ContractRegistry {
         }
         events.push_back(event_name);
         env.storage().instance().set(&DataKey::Events, &events);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 

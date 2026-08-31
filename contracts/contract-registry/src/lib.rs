@@ -134,6 +134,22 @@ impl ContractRegistry {
         if !env.storage().persistent().has(&key) {
             return Err(Error::ContractNotFound);
         }
+        // Perform an explicit update: refresh the registration TTL and ensure
+        // the record remains active. This makes `update_contract` a meaningful
+        // administrative operation (bump/refresh) instead of a silent no-op.
+        let mut record: ContractRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::ContractNotFound)?;
+        // Ensure the registration is marked active after update.
+        record.active = true;
+        env.storage().persistent().set(&key, &record);
+        env.storage().persistent().extend_ttl(
+            &key,
+            REGISTRATION_TTL_LEDGERS,
+            REGISTRATION_TTL_BUMP,
+        );
         Ok(())
     }
 
@@ -185,6 +201,11 @@ impl ContractRegistry {
 
     pub fn submit_event(env: Env, caller: Address, event_name: Symbol) -> Result<(), Error> {
         Self::ensure_not_paused(&env)?;
+        // Only the configured admin may submit registry events.
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::Unauthorized)?;
+        if admin != caller {
+            return Err(Error::Unauthorized);
+        }
         caller.require_auth();
         let max_events: u32 = env.storage().instance().get(&DataKey::MaxEvents).unwrap_or(0);
         let mut events: Vec<Symbol> = env

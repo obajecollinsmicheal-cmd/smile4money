@@ -271,7 +271,7 @@ impl EscrowContract {
         timeout_ledgers: Option<u32>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Oracle) {
-            panic!("Contract already initialized");
+            return Err(Error::AlreadyInitialized);
         }
         let token_client = token::Client::new(&env, &token);
         let _ = token_client.decimals();
@@ -924,10 +924,9 @@ impl EscrowContract {
         let current = env.ledger().sequence();
         let timeout = Self::get_timeout_ledgers(&env);
         if current <= m.activated_ledger + timeout {
-            // Timeout period has not elapsed yet — reject with MatchTimedOut reused
-            // as "too early". We return MatchTimedOut here to keep error codes minimal;
-            // callers should interpret it as "timeout not yet reached".
-            return Err(Error::MatchTimedOut);
+            // Timeout period has not elapsed yet — explicitly reject with TimeoutNotReached.
+            // `MatchTimedOut` is reserved for the true timed-out condition.
+            return Err(Error::TimeoutNotReached);
         }
 
         let client = token::Client::new(&env, &m.token);

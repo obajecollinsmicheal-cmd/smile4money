@@ -536,10 +536,32 @@ fn test_submit_event_requires_auth() {
     let (_admin, caller, contract_id) = setup(&env);
     let client = ContractRegistryClient::new(&env, &contract_id);
 
-    // This should technically succeed because mock_all_auths() allows any caller
-    // But this verifies the function executes
+    // Non-admin callers must be rejected even if authenticated.
     let result = client.try_submit_event(&caller, &Symbol::new(&env, "event"));
-    assert!(result.is_ok());
+    assert!(matches!(result, Err(Ok(Error::Unauthorized))));
+}
+
+#[test]
+fn test_non_admin_does_not_consume_event_capacity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (admin, caller, contract_id) = setup_with_max_events(&env, 1);
+    let client = ContractRegistryClient::new(&env, &contract_id);
+
+    // Admin can submit one event
+    assert!(client.try_submit_event(&admin, &Symbol::new(&env, "one")) .is_ok());
+
+    // Non-admin attempts should be rejected and must not consume the cap
+    assert!(matches!(
+        client.try_submit_event(&caller, &Symbol::new(&env, "two")),
+        Err(Ok(Error::Unauthorized))
+    ));
+
+    // Admin should still see MaxEventsReached when submitting another
+    assert!(matches!(
+        client.try_submit_event(&admin, &Symbol::new(&env, "three")),
+        Err(Ok(Error::MaxEventsReached))
+    ));
 }
 
 // ============================================================================

@@ -34,6 +34,9 @@ use soroban_sdk::contracterror;
 /// | 21   | MatchTimedOut         | match has already timed out; use claim_timeout to reclaim funds |
 /// | 22   | InvalidToken          | the provided token address does not match the initialized token |
 /// | 23   | InvalidAdmin          | the new admin address is invalid (zero address or same as current admin) |
+| 26   | InsufficientReserve   | contract balance too low to cover payout + Stellar minimum reserve |
+| 27   | InvalidAddress        | a player address is invalid (zero address / burn address) |
+| 28   | TimeoutNotReached     | `claim_timeout` called before the configured timeout elapses |
 /// | 24   | StakeTooLow           | stake_amount is below the minimum allowed stake |
 /// | 25   | StakeTooHigh          | stake_amount exceeds the maximum allowed stake |
 /// | 26   | InsufficientReserve   | contract balance too low to cover payout + Stellar minimum reserve |
@@ -135,4 +138,8 @@ pub enum Error {
     /// Players must be valid, controlled addresses. Matches created with zero addresses
     /// would result in payout funds being sent to uncontrolled addresses.
     InvalidAddress = 27,
+
+    /// [E028] `claim_timeout` was invoked too early; the configured timeout period
+    /// has not yet elapsed since the match became `Active`.
+    TimeoutNotReached = 28,
 }

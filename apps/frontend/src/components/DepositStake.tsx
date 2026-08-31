@@ -139,7 +139,16 @@ export function DepositStake({
 
   const hasDeposited = (matchDetails: MatchDetails | null): boolean => {
     if (!matchDetails || !playerAddress) return false;
-    return matchDetails.player1Deposited || matchDetails.player2Deposited;
+    // Identify which player is acting by comparing against the stored addresses,
+    // then check only that player's deposit flag. Otherwise a player's deposit
+    // would incorrectly disable the other player's deposit button.
+    if (matchDetails.player1 === playerAddress) {
+      return matchDetails.player1Deposited;
+    }
+    if (matchDetails.player2 === playerAddress) {
+      return matchDetails.player2Deposited;
+    }
+    return false;
   };
 
   const fetchMatchDetails = useCallback(async () => {

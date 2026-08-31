@@ -117,6 +117,22 @@ export class RateLimitStore {
   }
 }
 
+interface RateLimitMiddlewareOptions {
+  keyExtractor?: (req: Request) => string;
+  statusCode?: number;
+  message?: string;
+  /**
+   * IP addresses of proxies that this server trusts to set the X-Forwarded-For
+   * header (e.g. a reverse proxy like nginx or a load balancer).
+   *
+   * The X-Forwarded-For header is only honored when the request's direct
+   * connection peer (req.socket.remoteAddress) is in this list. Defaults to an
+   * empty list, meaning the header is never trusted and the direct connection
+   * IP is used for rate limiting.
+   */
+  trustedProxies?: string[];
+}
+
 /**
  * Express middleware factory for rate limiting by IP address.
  *
@@ -127,14 +143,15 @@ export class RateLimitStore {
  * Example usage:
  * ```
  * const limiter = new RateLimitStore(100, 60000, 100); // 100 req/min
- * router.use(createRateLimitMiddleware(limiter));
+ * router.use(createRateLimitMiddleware(limiter, { trustedProxies: ['127.0.0.1'] }));
  * ```
  */
 export function createRateLimitMiddleware(
   store: RateLimitStore,
-  options?: { keyExtractor?: (req: Request) => string; statusCode?: number; message?: string },
+  options?: RateLimitMiddlewareOptions,
 ) {
-  const keyExtractor = options?.keyExtractor || ((req: Request) => getClientIp(req));
+  const trustedProxies = options?.trustedProxies || [];
+  const keyExtractor = options?.keyExtractor || ((req: Request) => getClientIp(req, trustedProxies));
   const statusCode = options?.statusCode || 429;
   const message = options?.message || 'Too many requests, please try again later';
 
@@ -165,13 +182,21 @@ export function createRateLimitMiddleware(
 
 /**
  * Extract the client's IP address from the request.
- * Considers X-Forwarded-For header for proxied requests.
+ *
+ * The X-Forwarded-For header is only honored when the request arrives directly
+ * from a trusted proxy; otherwise a client could spoof the header to cycle
+ * through fake IPs and bypass per-IP rate limiting.
  */
-function getClientIp(req: Request): string {
-  const forwarded = req.header('X-Forwarded-For');
-  if (forwarded) {
-    // X-Forwarded-For can be a comma-separated list; take the first IP
-    return forwarded.split(',')[0].trim();
+function getClientIp(req: Request, trustedProxies: string[]): string {
+  const remoteAddress = req.socket.remoteAddress || 'unknown';
+
+  if (trustedProxies.includes(remoteAddress)) {
+    const forwarded = req.header('X-Forwarded-For');
+    if (forwarded) {
+      // X-Forwarded-For can be a comma-separated list; take the first IP (the original client)
+      return forwarded.split(',')[0].trim();
+    }
   }
-  return req.socket.remoteAddress || 'unknown';
+
+  return remoteAddress;
 }

@@ -271,7 +271,7 @@ impl EscrowContract {
         timeout_ledgers: Option<u32>,
     ) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Oracle) {
-            panic!("Contract already initialized");
+            return Err(Error::AlreadyInitialized);
         }
         let token_client = token::Client::new(&env, &token);
         let _ = token_client.decimals();

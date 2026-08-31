@@ -208,6 +208,11 @@ impl ContractRegistry {
 
     pub fn submit_event(env: Env, caller: Address, event_name: Symbol) -> Result<(), Error> {
         Self::ensure_not_paused(&env)?;
+        // Only the configured admin may submit registry events.
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).ok_or(Error::Unauthorized)?;
+        if admin != caller {
+            return Err(Error::Unauthorized);
+        }
         caller.require_auth();
         let max_events: u32 = env.storage().instance().get(&DataKey::MaxEvents).unwrap_or(0);
         let mut events: Vec<Symbol> = env

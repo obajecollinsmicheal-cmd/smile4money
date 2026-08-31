@@ -59,6 +59,27 @@ fn setup() -> (Env, Address, Address, Address, Address, Address, Address, Addres
 }
 
 #[test]
+fn test_initialize_twice_returns_already_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let oracle = Address::generate(&env);
+    let admin = Address::generate(&env);
+    let safe_address = Address::generate(&env);
+    let token_id = env.register_stellar_asset_contract_v2(admin.clone());
+    let token_addr = token_id.address();
+    let contract_id = env.register(EscrowContract, ());
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // First initialize should succeed
+    let res = client.try_initialize(&oracle, &admin, &token_addr, &safe_address, &None, &None);
+    assert!(res.is_ok());
+
+    // Second initialize should return AlreadyInitialized rather than panic
+    let res2 = client.try_initialize(&oracle, &admin, &token_addr, &safe_address, &None, &None);
+    assert!(matches!(res2, Err(Ok(Error::AlreadyInitialized))));
+}
+
+#[test]
 fn test_create_match() {
     let (env, contract_id, _oracle, player1, player2, token, _admin, _safe_address) = setup();
     let client = EscrowContractClient::new(&env, &contract_id);
@@ -3292,6 +3313,35 @@ fn test_claim_timeout_player1_succeeds_after_timeout() {
     assert_eq!(client.get_match(&id).state, MatchState::Cancelled);
     assert_eq!(token_client.balance(&player1), 1000);
     assert_eq!(token_client.balance(&player2), 1000);
+}
+
+#[test]
+fn test_claim_timeout_boundary() {
+    let (env, contract_id, _oracle, player1, player2, token, _admin, _safe_address) = setup();
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let id = client.create_match(
+        &player1,
+        &player2,
+        &100,
+        &token,
+        &String::from_str(&env, "timeout_boundary"),
+        &Platform::Lichess,
+    );
+    client.deposit(&id, &player1);
+    client.deposit(&id, &player2);
+
+    // The match becomes Active at the ledger sequence at deposit time.
+    let activated = env.ledger().sequence();
+    let timeout = crate::TIMEOUT_LEDGERS;
+
+    // Immediately before the timeout window: should return TimeoutNotReached
+    env.ledger().set_sequence_number(activated + timeout - 1);
+    assert_eq!(client.try_claim_timeout(&id, &player1), Err(Ok(Error::TimeoutNotReached)));
+
+    // Exactly when timeout becomes valid: claim should succeed
+    env.ledger().set_sequence_number(activated + timeout);
+    assert!(client.try_claim_timeout(&id, &player1).is_ok());
 }
 
 /// claim_timeout must fail with MatchTimedOut (too early) when called before

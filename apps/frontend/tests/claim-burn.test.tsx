@@ -2,11 +2,18 @@ import React from 'react';
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, it, expect, vi } from 'vitest';
-import { ClaimBurn } from '../src/components/claim-burn';
+import { ClaimBurn, type ClaimBurnProps } from '../src/components/claim-burn';
 import { ToastProvider } from '../src/components/Toast';
 
 function renderWithProviders(ui: React.ReactElement) {
-  return render(<ToastProvider>{ui}</ToastProvider>);
+  const element = React.isValidElement<ClaimBurnProps>(ui)
+    ? React.cloneElement(ui, {
+        onSimulateTransaction:
+          ui.props.onSimulateTransaction ??
+          vi.fn().mockResolvedValue({ minResourceFee: '100' }),
+      })
+    : ui;
+  return render(<ToastProvider>{element}</ToastProvider>);
 }
 
 describe('ClaimBurn — wallet states', () => {
@@ -88,27 +95,72 @@ describe('ClaimBurn — toggle', () => {
 });
 
 describe('ClaimBurn — confirmation flow', () => {
-  it('shows confirmation overlay after clicking submit', () => {
+  it('shows confirmation overlay after simulating the transaction', async () => {
     renderWithProviders(<ClaimBurn walletState="connected" />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
-    expect(screen.getByTestId('confirm-overlay')).toBeInTheDocument();
+    expect(await screen.findByTestId('confirm-overlay')).toBeInTheDocument();
   });
 
-  it('hides submit button when showing confirmation', () => {
+  it('hides submit button when showing confirmation', async () => {
     renderWithProviders(<ClaimBurn walletState="connected" />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
+    await screen.findByTestId('confirm-overlay');
     expect(screen.queryByTestId('submit-btn')).not.toBeInTheDocument();
   });
 
-  it('cancels confirmation and shows submit button again', () => {
+  it('cancels confirmation and shows submit button again', async () => {
     renderWithProviders(<ClaimBurn walletState="connected" />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('cancel-btn'));
     expect(screen.getByTestId('submit-btn')).toBeInTheDocument();
     expect(screen.queryByTestId('confirm-overlay')).not.toBeInTheDocument();
+  });
+
+  it('simulates before confirmation and displays the estimated fee in stroops and XLM', async () => {
+    let resolveSimulation!: (response: { minResourceFee: string }) => void;
+    const onSimulateTransaction = vi.fn(
+      () =>
+        new Promise<{ minResourceFee: string }>((resolve) => {
+          resolveSimulation = resolve;
+        }),
+    );
+    renderWithProviders(
+      <ClaimBurn walletState="connected" onSimulateTransaction={onSimulateTransaction} />,
+    );
+    await userEvent.type(screen.getByTestId('amount-input'), '10');
+    fireEvent.click(screen.getByTestId('submit-btn'));
+    await waitFor(() => expect(onSimulateTransaction).toHaveBeenCalledOnce());
+    expect(screen.queryByTestId('confirm-overlay')).not.toBeInTheDocument();
+    resolveSimulation({ minResourceFee: '12345678' });
+
+    expect(await screen.findByTestId('estimated-fee')).toHaveTextContent(
+      'Estimated fee: 12345678 stroops (1.2345678 XLM)',
+    );
+    expect(onSimulateTransaction).toHaveBeenCalledWith('claim', '10');
+  });
+
+  it('shows a simulation error and does not open confirmation when simulation fails', async () => {
+    const onSimulateTransaction = vi.fn().mockResolvedValue({ error: 'HostError' });
+    const onClaim = vi.fn();
+    renderWithProviders(
+      <ClaimBurn
+        walletState="connected"
+        onSimulateTransaction={onSimulateTransaction}
+        onClaim={onClaim}
+      />,
+    );
+    await userEvent.type(screen.getByTestId('amount-input'), '10');
+    fireEvent.click(screen.getByTestId('submit-btn'));
+
+    expect(await screen.findByTestId('error-msg')).toHaveTextContent(
+      'Transaction simulation failed: HostError',
+    );
+    expect(screen.queryByTestId('confirm-overlay')).not.toBeInTheDocument();
+    expect(onClaim).not.toHaveBeenCalled();
   });
 
   it('shows amount in confirmation text', async () => {
@@ -126,7 +178,7 @@ describe('ClaimBurn — submit and error handling', () => {
     renderWithProviders(<ClaimBurn walletState="connected" onClaim={onClaim} />);
     await userEvent.type(screen.getByTestId('amount-input'), '12.5');
     fireEvent.click(screen.getByTestId('submit-btn'));
-    await waitFor(() => expect(screen.getByTestId('confirm-overlay')).toBeInTheDocument());
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('confirm-btn'));
     await waitFor(() => expect(onClaim).toHaveBeenCalledTimes(1));
     expect(onClaim).toHaveBeenCalledWith('12.5');
@@ -144,7 +196,7 @@ describe('ClaimBurn — submit and error handling', () => {
     fireEvent.click(screen.getByTestId('toggle-burn'));
     await userEvent.type(screen.getByTestId('amount-input'), '5');
     fireEvent.click(screen.getByTestId('submit-btn'));
-    await waitFor(() => expect(screen.getByTestId('confirm-overlay')).toBeInTheDocument());
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('confirm-btn'));
     await waitFor(() => expect(screen.getByTestId('success-msg')).toBeInTheDocument());
     expect(onBurn).toHaveBeenCalledWith('5');
@@ -155,6 +207,7 @@ describe('ClaimBurn — submit and error handling', () => {
     renderWithProviders(<ClaimBurn walletState="connected" onClaim={onClaim} />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('confirm-btn'));
     await waitFor(() => expect(screen.getByTestId('error-msg')).toBeInTheDocument());
     expect(screen.getByTestId('error-msg')).toHaveTextContent('Transaction failed');
@@ -165,6 +218,7 @@ describe('ClaimBurn — submit and error handling', () => {
     renderWithProviders(<ClaimBurn walletState="connected" onClaim={onClaim} />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('confirm-btn'));
     await waitFor(() => expect(screen.getByTestId('error-msg')).toBeInTheDocument());
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '20' } });
@@ -223,6 +277,7 @@ describe('ClaimBurn — max balance button', () => {
     renderWithProviders(<ClaimBurn walletState="connected" balance="10" onClaim={onClaim} />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('confirm-btn'));
     expect(screen.getByTestId('max-btn')).toBeDisabled();
     await waitFor(() => expect(screen.getByTestId('success-msg')).toBeInTheDocument());
@@ -252,6 +307,7 @@ describe('ClaimBurn — accessibility', () => {
     renderWithProviders(<ClaimBurn walletState="connected" onClaim={onClaim} />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
+    await screen.findByTestId('confirm-overlay');
     fireEvent.click(screen.getByTestId('confirm-btn'));
     await waitFor(() => expect(screen.getByTestId('error-msg')).toBeInTheDocument());
     expect(screen.getByTestId('amount-input')).toHaveAttribute(
@@ -260,11 +316,11 @@ describe('ClaimBurn — accessibility', () => {
     );
   });
 
-  it('confirm overlay has dialog role and aria-modal', () => {
+  it('confirm overlay has dialog role and aria-modal', async () => {
     renderWithProviders(<ClaimBurn walletState="connected" />);
     fireEvent.change(screen.getByTestId('amount-input'), { target: { value: '10' } });
     fireEvent.click(screen.getByTestId('submit-btn'));
-    const overlay = screen.getByTestId('confirm-overlay');
+    const overlay = await screen.findByTestId('confirm-overlay');
     expect(overlay).toHaveAttribute('role', 'dialog');
     expect(overlay).toHaveAttribute('aria-modal', 'true');
   });

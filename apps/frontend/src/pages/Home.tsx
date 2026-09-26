@@ -13,7 +13,7 @@ export function Home() {
   const { walletState, address, balance, network, connect, disconnect, refreshBalance } =
     useWalletContext();
   const { theme, toggle } = useThemeContext();
-  const { handleClaim, handleBurn } = useTransactions(address, network);
+  const { handleClaim, handleBurn, handleSimulateClaimBurn } = useTransactions(address, network);
 
   return (
     <main className="dark:bg-slate-950 dark:text-slate-100 min-h-screen bg-gray-100 px-4 py-6 text-slate-900 transition-colors">
@@ -37,6 +37,7 @@ export function Home() {
             onRefreshBalance={refreshBalance}
             onClaim={handleClaim}
             onBurn={handleBurn}
+            onSimulateTransaction={handleSimulateClaimBurn}
             publicKey={address}
             balance={balance}
             expectedNetwork="testnet"

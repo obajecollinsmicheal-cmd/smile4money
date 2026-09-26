@@ -341,10 +341,31 @@ pub enum DataKey {
     /// The default SEP-41 token address used for staking.
     ///
     /// Set during [`initialize`](crate::EscrowContract::initialize). Each
-    /// [`Match`] also stores its own `token` field, which may differ if
-    /// per-match tokens are supported in future versions.
+    /// [`Match`] also stores its own `token` field, which is the token the
+    /// allowlist approved at creation time and the token its deposits and
+    /// payout use.
+    ///
+    /// This is the contract's *default* token, not the only permitted one:
+    /// [`add_token`](crate::EscrowContract::add_token) can extend the accepted
+    /// set, and it is seeded into the allowlist automatically by `initialize`
+    /// so an existing deployment keeps working unchanged.
     /// Stored in **instance** storage.
     Token,
+
+    /// Whether a given SEP-41 token is on the accepted-token allowlist.
+    ///
+    /// Presence of the key means "allowed"; absence means "rejected". A boolean
+    /// is stored rather than a `Vec<Address>` so that checking a token is a
+    /// single storage read with a fixed cost, independent of how many tokens
+    /// are allowlisted — iterating a list on the `create_match` path would
+    /// make match creation more expensive every time a token is added.
+    ///
+    /// Seeded with [`Token`](DataKey::Token) by `initialize` and maintained
+    /// exclusively by the admin via
+    /// [`add_token`](crate::EscrowContract::add_token) and
+    /// [`remove_token`](crate::EscrowContract::remove_token).
+    /// Stored in **persistent** storage, bumped alongside the match entries.
+    TokenAllowlisted(Address),
 
     /// The pre-registered destination address for [`emergency_drain`](crate::EscrowContract::emergency_drain).
     ///

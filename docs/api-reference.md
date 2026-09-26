@@ -36,6 +36,79 @@ pub fn initialize(env: Env, oracle: Address, admin: Address, token: Address) -> 
 
 ### Admin Functions
 
+#### `add_token`
+
+Allowlist a SEP-41 token so matches may be created in it.
+
+**Signature:**
+```rust
+pub fn add_token(env: Env, token: Address, caller: Address) -> Result<(), Error>
+```
+
+**Behavior:**
+- Probes the token (calls `decimals`) so a typo or non-token address is
+  rejected here rather than at a player's deposit
+- Sets the allowlist flag for `token`
+- Extends TTL to `MATCH_TTL_LEDGERS`
+- Emits `("admin", "token_add")` with `(token, admin)`
+
+**Authorization:** Requires admin signature
+
+**Errors:**
+- `Error::Unauthorized`: Caller is not the admin
+- `Error::TokenAlreadyListed`: The token is already allowlisted
+
+**Note:** Allowlisting a token is *not* a statement that it is safe or liquid â€”
+only that the admin accepts it as a stake currency. The allowlist exists to
+stop an arbitrary caller from pointing the escrow at a contract of their
+choosing; the judgement about which currencies to list stays with the admin,
+and every change is recorded on-chain.
+
+---
+
+#### `remove_token`
+
+Delist a token so no new matches may be created in it.
+
+**Signature:**
+```rust
+pub fn remove_token(env: Env, token: Address, caller: Address) -> Result<(), Error>
+```
+
+**Behavior:**
+- Clears the allowlist flag for `token`
+- Emits `("admin", "token_del")` with `(token, admin)`
+
+**In-flight matches are unaffected.** Removal stops *new* matches; it does not
+touch matches that already exist. Their escrows remain in that token and still
+settle and pay out there, because a player who funded a match must be able to
+finish it. This is how an admin delists a currency that turned out to be broken
+without stranding funds.
+
+**Authorization:** Requires admin signature
+
+**Errors:**
+- `Error::Unauthorized`: Caller is not the admin
+- `Error::TokenNotListed`: The token was not allowlisted
+- `Error::CannotRemoveDefault`: The token is the contract's default
+
+---
+
+#### `is_token_allowlisted`
+
+Read-only check of whether a token is currently accepted.
+
+**Signature:**
+```rust
+pub fn is_token_allowlisted(env: Env, token: Address) -> bool
+```
+
+Allows a frontend to grey out a currency selector without attempting a doomed
+`create_match`. The default token is always allowlisted, so this never returns
+`false` for it.
+
+---
+
 #### `pause`
 
 Pause the contract to prevent new matches, deposits, and result submissions.
@@ -120,7 +193,7 @@ pub fn create_match(
     player1: Address,
     player2: Address,
     stake_amount: i128,
-    token: Address,
+    token: Option<Address>,
     game_id: String,
     platform: Platform,
 ) -> Result<u64, Error>
@@ -130,7 +203,9 @@ pub fn create_match(
 - `player1`: Address of the match creator (must sign the transaction)
 - `player2`: Address of the opponent
 - `stake_amount`: Amount each player must deposit (in the token's smallest unit)
-- `token`: Address of the SEP-41 token contract used for this match
+- `token`: SEP-41 token for this match. `None` uses the contract's default token.
+  A non-`None` value must be on the admin-managed allowlist â€” see
+  [Token Allowlist](#token-allowlist).
 - `game_id`: Unique identifier from the chess platform (max 64 bytes)
 - `platform`: Chess platform enum (`Lichess` or `ChessDotCom`)
 
@@ -142,7 +217,9 @@ pub fn create_match(
 - Validates `player1 != player2`
 - Validates `game_id` length is between 1 and 64 bytes
 - Rejects duplicate `game_id` values
-- Creates match in `Pending` state
+- Resolves `token`: the explicit argument if given, otherwise the default
+- Rejects a token that is not on the allowlist
+- Creates match in `Pending` state, recording the resolved token
 - Increments match counter with overflow check
 - Extends TTL to `MATCH_TTL_LEDGERS` (~30 days)
 - Emits `("match", "created")` event
@@ -151,24 +228,42 @@ pub fn create_match(
 
 **Errors:**
 - `Error::ContractPaused`: Contract is paused
-- `Error::InvalidAmount`: `stake_amount ≤ 0`
+- `Error::InvalidAmount`: `stake_amount â‰¤ 0`
 - `Error::InvalidPlayers`: `player1 == player2`
 - `Error::InvalidGameId`: `game_id` is empty or exceeds 64 bytes
 - `Error::DuplicateGameId`: `game_id` is already used in another match
+- `Error::TokenNotAllowlisted`: the token is not on the allowlist
 - `Error::AlreadyExists`: Match ID collision (internal counter error)
 - `Error::Overflow`: Match counter would exceed `u64::MAX`
 
 **Example:**
 ```rust
+// Use the contract's default token
 let match_id = escrow.create_match(
     &player1_addr,
     &player2_addr,
     &1_000_0000, // 100 XLM (7 decimals)
-    &xlm_token_addr,
+    &None,
     &String::from_str(&env, "lichess_abc123"),
     &Platform::Lichess,
 );
+
+// Or name an allowlisted token explicitly (e.g. USDC)
+let usdc_match = escrow.create_match(
+    &player1_addr,
+    &player2_addr,
+    &100_000000, // 100 USDC (6 decimals)
+    &Some(usdc_token_addr),
+    &String::from_str(&env, "lichess_def456"),
+    &Platform::Lichess,
+);
 ```
+
+> **Breaking change:** `token` was previously a required `Address` that had to
+> equal the token from `initialize`. It is now an `Option<Address>`, and any
+> allowlisted token is accepted. Existing clients that pass the default token
+> must wrap it in `Some(...)`; the contract's own `create_match` name and
+> argument order are otherwise unchanged.
 
 ---
 
@@ -211,7 +306,7 @@ pub fn deposit(env: Env, match_id: u64, player: Address) -> Result<(), Error>
 // Player 1 deposits
 escrow.deposit(&match_id, &player1_addr);
 
-// Player 2 deposits — match transitions to Active
+// Player 2 deposits â€” match transitions to Active
 escrow.deposit(&match_id, &player2_addr);
 ```
 
@@ -275,7 +370,7 @@ pub fn submit_result(
 
 **Parameters:**
 - `match_id`: ID of the match to finalize
-- `game_id`: Chess platform game identifier — must match the `game_id` stored in the match record
+- `game_id`: Chess platform game identifier â€” must match the `game_id` stored in the match record
 - `winner`: Result enum (`Player1`, `Player2`, or `Draw`)
 - `caller`: Address submitting the result (must be the registered oracle)
 
@@ -285,8 +380,8 @@ pub fn submit_result(
 - Validates match is in `Active` state
 - Validates both players have deposited
 - Executes payout based on `winner`:
-  - `Player1`: Transfers `stake_amount × 2` to `player1`
-  - `Player2`: Transfers `stake_amount × 2` to `player2`
+  - `Player1`: Transfers `stake_amount Ã— 2` to `player1`
+  - `Player2`: Transfers `stake_amount Ã— 2` to `player2`
   - `Draw`: Returns `stake_amount` to each player
 - Transitions to `Completed` state
 - Extends TTL to `MATCH_TTL_LEDGERS`
@@ -383,12 +478,12 @@ pub fn get_escrow_balance(env: Env, match_id: u64) -> Result<i128, Error>
 - `match_id`: ID of the match to check
 
 **Returns:**
-- `i128`: Total escrowed amount (`0`, `stake_amount`, or `2 × stake_amount`)
+- `i128`: Total escrowed amount (`0`, `stake_amount`, or `2 Ã— stake_amount`)
 
 **Behavior:**
 - Returns `0` if match is `Completed` or `Cancelled`
 - Returns `stake_amount` if exactly one player has deposited
-- Returns `2 × stake_amount` if both players have deposited
+- Returns `2 Ã— stake_amount` if both players have deposited
 
 **Errors:**
 - `Error::MatchNotFound`: Invalid `match_id`
@@ -772,8 +867,8 @@ Match outcome for the escrow contract's `submit_result`.
 
 ```rust
 pub enum Winner {
-    Player1, // Player1 receives stake_amount × 2
-    Player2, // Player2 receives stake_amount × 2
+    Player1, // Player1 receives stake_amount Ã— 2
+    Player2, // Player2 receives stake_amount Ã— 2
     Draw,    // Each player receives their original stake_amount
 }
 ```
@@ -822,14 +917,25 @@ pub enum Error {
     AlreadyInitialized = 7,  // Contract already initialized (unused; initialize panics instead)
     Overflow           = 8,  // Match counter would exceed u64::MAX
     ContractPaused     = 9,  // Contract is paused; mutating operations are blocked
-    InvalidAmount      = 10, // stake_amount ≤ 0
+    InvalidAmount      = 10, // stake_amount â‰¤ 0
     InvalidGameId      = 11, // game_id is empty or exceeds 64 bytes
     InvalidPlayers     = 12, // player1 == player2 in create_match
     GameIdMismatch     = 13, // Oracle submitted result for the wrong game_id
     DuplicateGameId    = 14, // game_id is already linked to another match
     TransferFailed     = 15, // Token transfer failed
-    MatchCancelled     = 16, // Deposit rejected — match has been cancelled
+    MatchCancelled     = 16, // Deposit rejected â€” match has been cancelled
     MatchCompleted     = 17, // Deposit rejected — match has already completed
+    InvalidToken      = 22, // Token does not match the configured default (legacy; see E028)
+    InvalidAdmin      = 23, // New admin address is invalid
+    StakeTooLow       = 24, // stake_amount below MIN_STAKE
+    StakeTooHigh      = 25, // stake_amount above MAX_STAKE
+    InsufficientReserve = 26, // Balance too low to cover payout + minimum reserve
+    InvalidAddress    = 27, // A player address is the zero/burn address
+    TokenNotAllowlisted = 28, // Token is not on the admin-managed allowlist
+    TokenAlreadyListed  = 29, // add_token called for an already-allowlisted token
+    TokenNotListed      = 30, // remove_token called for a token that is not allowlisted
+    CannotRemoveDefault = 31, // remove_token called for the contract default token
+}
 }
 ```
 
@@ -1347,7 +1453,7 @@ let match_id = escrow.create_match(...);
 // Player1 deposits
 escrow.deposit(&match_id, &player1);
 
-// Player2 decides not to play — cancels and player1 is refunded
+// Player2 decides not to play â€” cancels and player1 is refunded
 escrow.cancel_match(&match_id, &player2);
 ```
 

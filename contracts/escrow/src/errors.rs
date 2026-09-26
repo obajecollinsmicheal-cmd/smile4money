@@ -136,6 +136,31 @@ pub enum Error {
     /// [E027] One of the player addresses is invalid (e.g. zero address / burn address).
     InvalidAddress = 27,
 
+    /// [E028] The token is not on the admin-managed allowlist.
+    ///
+    /// Returned by `create_match` when the requested token has never been
+    /// allowlisted, or was allowlisted and later removed. This is the check
+    /// that stops a caller from escrowing an arbitrary SEP-41 contract.
+    TokenNotAllowlisted = 28,
+
+    /// [E029] `add_token` was called for a token that is already allowlisted.
+    ///
+    /// A distinct error rather than a silent no-op, so a misconfigured
+    /// deployment script fails loudly instead of appearing to have added the
+    /// same token twice.
+    TokenAlreadyListed = 29,
+
+    /// [E030] `remove_token` was called for a token that is not allowlisted.
+    TokenNotListed = 30,
+
+    /// [E031] `remove_token` was called for the contract's default token.
+    ///
+    /// The default token set at `initialize` cannot be removed. Otherwise the
+    /// contract could be left with no acceptable token at all, and every
+    /// subsequent `create_match` — including one that omits the token argument
+    /// and so falls back to the default — would fail with no way to recover
+    /// short of a contract upgrade.
+    CannotRemoveDefault = 31,
     /// [E028] `override_result` was called after the dispute window expired.
     DisputeWindowExpired = 28,
 }

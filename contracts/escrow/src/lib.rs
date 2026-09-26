@@ -278,6 +278,20 @@ impl EscrowContract {
         env.storage().instance().set(&DataKey::Oracle, &oracle);
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::Token, &token);
+
+        // Seed the allowlist with the default token so a contract that is
+        // never extended behaves exactly as it did before the allowlist
+        // existed: the only accepted token is the one passed to `initialize`.
+        // `remove_token` refuses to remove this entry, so the contract can
+        // never be left with no acceptable token at all.
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenAllowlisted(token.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenAllowlisted(token.clone()),
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
         env.storage()
             .instance()
             .set(&DataKey::SafeAddress, &safe_address);
@@ -394,12 +408,29 @@ impl EscrowContract {
     }
 
     /// Create a new match. Both players must call `deposit` before the game starts.
+    ///
+    /// `token` selects which SEP-41 token this match is escrowed in. Passing
+    /// `None` uses the contract's default token (the one supplied to
+    /// [`initialize`](EscrowContract::initialize)), which is what a caller that
+    /// does not care about the currency should do.
+    ///
+    /// A non-`None` token must be on the admin-managed allowlist
+    /// ([`add_token`](EscrowContract::add_token)); otherwise the call fails with
+    /// [`Error::TokenNotAllowlisted`]. This is what stops a caller from naming
+    /// an arbitrary SEP-41 contract and having the escrow pull funds through
+    /// it.
+    ///
+    /// The chosen token is copied into [`Match::token`] at creation and is the
+    /// token [`deposit`](EscrowContract::deposit) pulls and the payout pays
+    /// out in. A later `remove_token` does **not** disturb matches that already
+    /// exist: it stops new matches from being created in that token, leaving
+    /// in-flight escrows untouched and settleable.
     pub fn create_match(
         env: Env,
         player1: Address,
         player2: Address,
         stake_amount: i128,
-        token: Address,
+        token: Option<Address>,
         game_id: String,
         platform: Platform,
     ) -> Result<u64, Error> {
@@ -444,13 +475,27 @@ impl EscrowContract {
             return Err(Error::DuplicateGameId);
         }
 
+        // Resolve the token: an explicit argument overrides the default, and
+        // `None` means "use whatever this contract was initialized with".
         let stored_token: Address = env
             .storage()
             .instance()
             .get(&DataKey::Token)
             .ok_or(Error::Unauthorized)?;
-        if token != stored_token {
-            return Err(Error::InvalidToken);
+        let token = match token {
+            Some(t) => t,
+            None => stored_token,
+        };
+
+        // The default token is allowlisted by `initialize` and cannot be
+        // removed, so checking every token — including the default — against
+        // the allowlist is both simpler and stricter than special-casing it.
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::TokenAllowlisted(token.clone()))
+        {
+            return Err(Error::TokenNotAllowlisted);
         }
 
         let id: u64 = env
@@ -1324,3 +1369,127 @@ mod tests;
 
 #[cfg(test)]
 mod tests_e2e;
+
+    /// Read the admin address. Shared by every admin-only entry point so the
+    /// "is this caller the admin" rule is written down exactly once.
+    fn require_admin(env: &Env, caller: &Address) -> Result<Address, Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::Unauthorized)?;
+        if *caller != admin {
+            return Err(Error::Unauthorized);
+        }
+        caller.require_auth();
+        Ok(admin)
+    }
+
+    /// Return whether `token` is currently accepted by this contract.
+    ///
+    /// A read-only view so a frontend can grey out a currency selector without
+    /// having to attempt a doomed `create_match` first. The default token is
+    /// always allowlisted, so this never returns `false` for it.
+    pub fn is_token_allowlisted(env: Env, token: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::TokenAllowlisted(token))
+    }
+
+    /// Add a SEP-41 token to the allowlist — admin only.
+    ///
+    /// After this call, `create_match` may name `token` explicitly and matches
+    /// created in it will escrow, settle and pay out in `token`.
+    ///
+    /// Adding a token is deliberately **not** a statement that the token is
+    /// safe, liquid, or backed by anything. It is only a statement that the
+    /// admin accepts it as a stake currency. The allowlist exists to stop an
+    /// arbitrary caller from pointing the escrow at a contract of their
+    /// choosing; the judgement about which currencies to list stays with the
+    /// admin, and every change is recorded on-chain via the emitted event.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unauthorized`] — caller is not the admin.
+    /// * [`Error::TokenAlreadyListed`] — the token is already allowlisted.
+    pub fn add_token(env: Env, token: Address, caller: Address) -> Result<(), Error> {
+        let admin = Self::require_admin(&env, &caller)?;
+
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::TokenAllowlisted(token.clone()))
+        {
+            return Err(Error::TokenAlreadyListed);
+        }
+
+        // Probe the token so a typo or a non-token address is rejected here,
+        // at configuration time, rather than later when a player picks that
+        // currency and their deposit mysteriously fails.
+        let token_client = token::Client::new(&env, &token);
+        let _ = token_client.decimals();
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::TokenAllowlisted(token.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenAllowlisted(token.clone()),
+            MATCH_TTL_LEDGERS,
+            MATCH_TTL_LEDGERS,
+        );
+        Self::bump_instance_ttl(&env);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("token_add")),
+            (token, admin),
+        );
+        Ok(())
+    }
+
+    /// Remove a token from the allowlist — admin only.
+    ///
+    /// This stops **new** matches from being created in `token`. It does not
+    /// touch matches that already exist: their escrows remain in `token` and
+    /// still settle and pay out there, because a player who funded a match
+    /// must be able to finish it. Removing a token is how an admin delists a
+    /// currency that turned out to be broken without stranding funds.
+    ///
+    /// The contract's default token cannot be removed — see
+    /// [`Error::CannotRemoveDefault`].
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unauthorized`] — caller is not the admin.
+    /// * [`Error::TokenNotListed`] — the token was not allowlisted.
+    /// * [`Error::CannotRemoveDefault`] — the token is the contract default.
+    pub fn remove_token(env: Env, token: Address, caller: Address) -> Result<(), Error> {
+        let admin = Self::require_admin(&env, &caller)?;
+
+        let default_token: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Token)
+            .ok_or(Error::Unauthorized)?;
+        if token == default_token {
+            return Err(Error::CannotRemoveDefault);
+        }
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::TokenAllowlisted(token.clone()))
+        {
+            return Err(Error::TokenNotListed);
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TokenAllowlisted(token.clone()));
+        Self::bump_instance_ttl(&env);
+
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("token_del")),
+            (token, admin),
+        );
+        Ok(())
+    }

@@ -16,6 +16,9 @@ A Soroban smart contract for trustless chess match wagering on Stellar. It holds
 - [Public Functions](#public-functions)
   - [initialize](#initialize)
   - [update_oracle](#update_oracle)
+  - [add_token](#add_token)
+  - [remove_token](#remove_token)
+  - [is_token_allowlisted](#is_token_allowlisted)
   - [pause](#pause)
   - [unpause](#unpause)
   - [create_match](#create_match)
@@ -189,6 +192,73 @@ client.update_oracle(&new_oracle_address);
 
 ---
 
+### `add_token`
+
+Allowlists a SEP-41 token so that `create_match` may name it. Only the admin
+can call this. Emits `("admin", "token_add")`.
+
+```rust
+pub fn add_token(env: Env, token: Address, caller: Address) -> Result<(), Error>
+```
+
+The token is probed (its `decimals` is read) so a typo or a non-token address is
+rejected at configuration time rather than later at a player's deposit.
+
+Allowlisting a token is **not** an endorsement of it — it only records that the
+admin accepts it as a stake currency. The allowlist exists so an arbitrary
+caller cannot point the escrow at a contract of their choosing; deciding which
+currencies to list stays with the admin, and every change is recorded on-chain.
+
+**Errors**
+
+| Error | Condition |
+|-------|-----------|
+| `Unauthorized` | Caller is not the admin |
+| `TokenAlreadyListed` | The token is already allowlisted |
+
+---
+
+### `remove_token`
+
+Removes a token from the allowlist so no new match may be created in it. Only
+the admin can call this. Emits `("admin", "token_del")`.
+
+```rust
+pub fn remove_token(env: Env, token: Address, caller: Address) -> Result<(), Error>
+```
+
+**In-flight matches are unaffected.** Removal blocks *new* matches only; it does
+not touch matches that already exist. Their escrows stay in that token and
+still settle and pay out there, so a player who funded a match is never stranded
+mid-game. This is how a broken currency can be delisted safely.
+
+**Errors**
+
+| Error | Condition |
+|-------|-----------|
+| `Unauthorized` | Caller is not the admin |
+| `TokenNotListed` | The token was not allowlisted |
+| `CannotRemoveDefault` | The token is the contract's default token |
+
+The default token set at `initialize` cannot be removed — otherwise the contract
+could be left accepting no token at all, with no way to recover short of an
+upgrade.
+
+---
+
+### `is_token_allowlisted`
+
+Read-only check of whether a token is currently accepted.
+
+```rust
+pub fn is_token_allowlisted(env: Env, token: Address) -> bool
+```
+
+Lets a frontend grey out a currency selector without attempting a doomed
+`create_match`. The default token is always allowlisted.
+
+---
+
 ### `pause`
 
 Pauses the contract. Blocks `create_match`, `deposit`, and `submit_result`. Only the admin can call this.
@@ -255,7 +325,7 @@ pub fn create_match(
     player1: Address,
     player2: Address,
     stake_amount: i128,
-    token: Address,
+    token: Option<Address>,
     game_id: String,
     platform: Platform,
 ) -> Result<u64, Error>
@@ -268,9 +338,13 @@ pub fn create_match(
 | `player1` | `Address` | First player; must authorize this call |
 | `player2` | `Address` | Second player |
 | `stake_amount` | `i128` | Amount each player must deposit (must be > 0) |
-| `token` | `Address` | The Stellar asset contract address used for staking |
+| `token` | `Option<Address>` | SEP-41 token for this match. `None` uses the contract's default token. A non-`None` value must be on the admin-managed allowlist (see [`add_token`](#add_token)). |
 | `game_id` | `String` | Unique identifier for the chess game (max 64 bytes) |
 | `platform` | `Platform` | Chess platform (`Lichess` or `ChessDotCom`) |
+
+The resolved token is stored on the match and is the token `deposit` pulls and
+the payout pays out in. Matches in different tokens can run side by side in the
+same contract.
 
 **Returns** `Ok(u64)` — the new match ID (auto-incremented from 0).
 

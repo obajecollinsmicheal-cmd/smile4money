@@ -137,3 +137,60 @@
   opacity: 0.5;
   cursor: not-allowed;
 }
+
+/* ==========================================================================
+   Leaderboard page
+   ========================================================================== */
+
+.leaderboard {
+  padding: 1.5rem;
+  border-radius: 1rem;
+  background: #fff;
+  box-shadow: 0 2px 16px rgba(15, 23, 42, 0.08);
+  color: #111827;
+  min-width: 0;
+}
+
+.leaderboard h2,
+.leaderboard .leaderboard-title {
+  margin: 0 0 1rem;
+  font-size: 1.25rem;
+}
+
+/* Visually hidden but announced by screen readers. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* Numeric columns are right-aligned and tabular so the digits line up down
+   the column; `text-align: right` alone leaves them ragged. */
+.leaderboard .history-table td:nth-child(1),
+.leaderboard .history-table td:nth-child(n + 3) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.leaderboard .history-table td:nth-child(2) {
+  text-align: left;
+}
+
+.leaderboard .address {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+
+.leaderboard .address-small {
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 0.75rem;
+  color: #6b7280;
+  overflow-wrap: anywhere;
+}

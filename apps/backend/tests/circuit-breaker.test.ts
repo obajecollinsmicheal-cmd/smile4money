@@ -117,6 +117,25 @@ describe('CircuitBreaker', () => {
       expect(breaker.getState()).toBe(CircuitState.HALF_OPEN);
     });
 
+    it('closes after a successful probe and resets the failure count', () => {
+      const probeBreaker = new CircuitBreaker({
+        failureThreshold: 1,
+        cooldownMs: 1000,
+        successThreshold: 1,
+      });
+
+      probeBreaker.recordFailure();
+      vi.advanceTimersByTime(1000);
+      expect(probeBreaker.allowRequest()).toBe(true);
+      expect(probeBreaker.getState()).toBe(CircuitState.HALF_OPEN);
+
+      expect(probeBreaker.allowRequest()).toBe(true);
+      probeBreaker.recordSuccess();
+
+      expect(probeBreaker.getState()).toBe(CircuitState.CLOSED);
+      expect(probeBreaker.getFailureCount()).toBe(0);
+    });
+
     it('closes circuit after threshold successes', () => {
       breaker.recordSuccess();
       expect(breaker.getState()).toBe(CircuitState.HALF_OPEN);

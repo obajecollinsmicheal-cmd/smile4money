@@ -27,6 +27,7 @@ A Soroban smart contract for trustless chess match wagering on Stellar. It holds
   - [get_escrow_balance](#get_escrow_balance)
 - [Match Lifecycle](#match-lifecycle)
 - [Events](#events)
+- [Testing](#testing)
 - [Security Notes](#security-notes)
 
 ---
@@ -601,6 +602,96 @@ create_match()
 | `("admin", "oracle")` | `new_oracle` | `update_oracle` |
 | `("admin", "paused")` | `()` | `pause` |
 | `("admin", "unpaused")` | `()` | `unpause` |
+
+---
+
+## Testing
+
+### Running Tests Locally
+
+This contract includes comprehensive unit tests and property-based fuzz tests using [proptest](https://docs.rs/proptest/1.0.0/proptest/). All tests can be run locally with standard Rust tooling.
+
+#### Prerequisites
+
+- Rust 1.88.0 or later
+- Soroban SDK and targets installed:
+  ```bash
+  rustup install 1.88.0
+  rustup target add wasm32-unknown-unknown
+  ```
+
+#### Run All Tests
+
+```bash
+cargo test -p smile4money-escrow --lib
+```
+
+#### Run Only Unit Tests
+
+```bash
+cargo test -p smile4money-escrow --lib tests:: -- --skip tests_fuzz
+```
+
+#### Run Only Fuzz Tests
+
+```bash
+cargo test -p smile4money-escrow --lib tests_fuzz
+```
+
+#### Run Property-Based Tests with Increased Iterations
+
+By default, proptest runs 256 iterations per test. To increase coverage (useful for finding rare edge cases), set the `PROPTEST_CASES` environment variable:
+
+```bash
+PROPTEST_CASES=1000 cargo test -p smile4money-escrow --lib tests_fuzz::prop_
+```
+
+#### Run Exhaustive Fuzz Tests Only
+
+The exhaustive fuzz tests exercise exact boundary conditions and known-bad inputs:
+
+```bash
+cargo test -p smile4money-escrow --lib tests_fuzz::fuzz_
+```
+
+### Fuzz Test Coverage
+
+The fuzz test suite (`src/tests_fuzz.rs`) covers:
+
+#### Stake Amount Validation
+
+- **Valid range**: Tests that amounts in `[MIN_STAKE, MAX_STAKE]` are accepted
+- **Below minimum**: Tests that stakes < `MIN_STAKE` are rejected with `StakeTooLow`
+- **Above maximum**: Tests that stakes > `MAX_STAKE` are rejected with `StakeTooHigh`
+- **Boundaries**: Exact tests for `MIN_STAKE`, `MIN_STAKE-1`, `MAX_STAKE`, `MAX_STAKE+1`, zero, and negative values
+
+#### Game ID Validation
+
+- **Valid IDs**: Tests accept alphanumeric strings, underscores, and hyphens in the range `[1, 64]` bytes
+- **Empty strings**: Tests reject empty game IDs with `InvalidGameId`
+- **Oversized IDs**: Tests reject game IDs > 64 bytes with `InvalidGameId`
+- **Invalid characters**: Tests reject game IDs containing `@`, `#`, `.`, `/`, spaces, null bytes, and other non-alphanumeric characters with `InvalidGameId`
+- **Length boundaries**: Exact tests for IDs at `MAX_GAME_ID_LEN`, one over, and one under
+
+#### Address Validation
+
+- **Identical players**: Tests reject `player1 == player2` with `InvalidPlayers`
+- **Distinct players**: Tests accept two different valid addresses
+- **Zero address**: Implementation already handles zero addresses (XDR-based check in `is_zero_address`)
+
+### CI Integration
+
+All fuzz tests are automatically run in the CI pipeline:
+
+1. **Escrow Fuzz Tests Job** — runs in GitHub Actions on every push to `master` and on all pull requests
+   - Property-based tests: 100 iterations per test via `PROPTEST_CASES=100`
+   - Exhaustive fuzz tests: All boundary and character validation tests
+
+To view CI test results:
+
+```bash
+# Check GitHub Actions: https://github.com/obajecollinsmicheal-cmd/smile4money/actions
+```
 
 ---
 

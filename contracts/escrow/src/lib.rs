@@ -66,12 +66,12 @@ const MATCH_TTL_LEDGERS: u32 = 518_400;
 
 /// Minimum stake amount in the smallest token unit (1 stroop).
 /// Prevents economically meaningless zero-stake matches.
-const MIN_STAKE: i128 = 1;
+pub const MIN_STAKE: i128 = 1;
 
 /// Maximum stake amount in the smallest token unit.
 /// Prevents a single match from locking unbounded funds in escrow,
 /// concentrating risk, and amplifying the impact of any exploit.
-const MAX_STAKE: i128 = 10_000_000_000_000;
+pub const MAX_STAKE: i128 = 10_000_000_000_000;
 
 /// Instance-storage TTL threshold (~30 days at 5s/ledger).
 /// Instance entries (oracle, admin, token, paused, match_count) are
@@ -85,7 +85,7 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = 518_400;
 const INSTANCE_BUMP_AMOUNT: u32 = 518_400;
 
 /// Maximum allowed byte length for a game_id string.
-const MAX_GAME_ID_LEN: u32 = 64;
+pub const MAX_GAME_ID_LEN: u32 = 64;
 
 /// Dispute window: ~24 hours at 5s/ledger (17 280 ledgers).
 /// After an oracle result is submitted, the admin has this many ledgers to call
@@ -117,7 +117,7 @@ const TIMEOUT_LEDGERS: u32 = 120_960;
 /// confusing generic `TransferFailed`.
 ///
 /// `15 000 000 stroops = 1.5 XLM` (1 XLM minimum base reserve + 0.5 XLM slack).
-const ESCROW_RESERVE_BUFFER_STROOPS: i128 = 15_000_000;
+pub const ESCROW_RESERVE_BUFFER_STROOPS: i128 = 15_000_000;
 
 fn is_zero_address(env: &Env, addr: &Address) -> bool {
     // The all-zeros Stellar account key encodes to this strkey.
@@ -1324,3 +1324,6 @@ mod tests;
 
 #[cfg(test)]
 mod tests_e2e;
+
+#[cfg(test)]
+mod tests_fuzz;

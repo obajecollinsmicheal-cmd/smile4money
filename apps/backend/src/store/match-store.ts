@@ -2,6 +2,8 @@ export interface MatchRecord {
   matchId: number;
   player1: string;
   player2: string;
+  player1Username?: string; // Chess platform username for player1 (optional for backward compatibility)
+  player2Username?: string; // Chess platform username for player2 (optional for backward compatibility)
   stakeAmount: number;
   token: string;
   gameId: string;
@@ -12,6 +14,8 @@ export interface MatchRecord {
 interface CreateMatchPayload {
   player1: string;
   player2: string;
+  player1Username?: string;
+  player2Username?: string;
   stakeAmount: number;
   token: string;
   gameId: string;
@@ -32,6 +36,8 @@ export class MatchStore {
       matchId: this.nextId,
       player1: payload.player1,
       player2: payload.player2,
+      player1Username: payload.player1Username,
+      player2Username: payload.player2Username,
       stakeAmount: payload.stakeAmount,
       token: payload.token,
       gameId: payload.gameId,

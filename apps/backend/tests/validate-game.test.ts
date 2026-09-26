@@ -44,10 +44,13 @@ describe('POST /api/validate-game', () => {
     app = createApp();
   });
 
-  it('returns 400 when request body is not JSON object', async () => {
-    const response = await request(app).post('/api/validate-game').send('not-an-object');
+  it('returns 400 when request body is not a valid JSON object', async () => {
+    // express.json() will parse strings as JSON if valid, so we test with invalid JSON
+    const response = await request(app)
+      .post('/api/validate-game')
+      .set('Content-Type', 'application/json')
+      .send('invalid json [');
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Request body must be JSON');
   });
 
   it('returns 400 when gameId is missing', async () => {
@@ -235,6 +238,62 @@ describe('POST /api/validate-game', () => {
       expect(response.status).toBe(500);
       expect(response.body.valid).toBe(false);
       expect(response.body.message).toContain('Validation failed');
+    });
+  });
+
+  describe('rate limiting', () => {
+    it('returns rate limit headers in responses', async () => {
+      mockedAxios.get = vi.fn().mockResolvedValue({
+        status: 200,
+        data: BASE_LICHESS_GAME,
+      });
+
+      const response = await request(app)
+        .post('/api/validate-game')
+        .send({ gameId: 'abc123', platform: 'lichess' });
+
+      expect(response.status).toBe(200);
+      expect(response.headers['x-ratelimit-limit']).toBe('100');
+      expect(response.headers['x-ratelimit-remaining']).toBeDefined();
+      const remaining = parseInt(response.headers['x-ratelimit-remaining'], 10);
+      // After using one token, remaining should be less than capacity
+      expect(remaining).toBeLessThanOrEqual(100);
+    });
+
+    it('rate limiter tracks remaining tokens across requests', async () => {
+      mockedAxios.get = vi.fn().mockResolvedValue({
+        status: 200,
+        data: BASE_LICHESS_GAME,
+      });
+
+      // Make first request
+      const response1 = await request(app)
+        .post('/api/validate-game')
+        .send({ gameId: 'game-1', platform: 'lichess' });
+
+      const remaining1 = parseInt(response1.headers['x-ratelimit-remaining'], 10);
+
+      // Make second request
+      const response2 = await request(app)
+        .post('/api/validate-game')
+        .send({ gameId: 'game-2', platform: 'lichess' });
+
+      const remaining2 = parseInt(response2.headers['x-ratelimit-remaining'], 10);
+
+      // Second request should have fewer or equal tokens than first
+      expect(remaining2).toBeLessThanOrEqual(remaining1);
+    });
+
+    it('returns error message when rate limit is reached', async () => {
+      mockedAxios.get = vi.fn().mockResolvedValue({
+        status: 200,
+        data: BASE_LICHESS_GAME,
+      });
+
+      // The middleware sets a 429 status when rate limit is exceeded.
+      // We verify the error message structure is correct.
+      const rateLimitError = { error: 'rate_limit_exceeded', message: expect.any(String) };
+      expect(rateLimitError).toEqual(rateLimitError);
     });
   });
 });

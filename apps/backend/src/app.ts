@@ -3,6 +3,7 @@ import cors from 'cors';
 import healthRouter from './routes/health.js';
 import matchRouter from './routes/matches.js';
 import validateGameRouter from './routes/validate-game.js';
+import oracleRouter from './routes/oracle.js';
 
 /**
  * Parse the ALLOWED_ORIGINS environment variable into an array of origin strings.
@@ -43,5 +44,6 @@ app.use(express.json());
 app.use('/health', healthRouter);
 app.use('/api/matches', matchRouter);
 app.use('/api/validate-game', validateGameRouter);
+app.use('/api/oracle', oracleRouter);
 
 export default app;

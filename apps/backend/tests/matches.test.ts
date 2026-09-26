@@ -91,6 +91,23 @@ describe('POST /api/matches', () => {
     expect(response.status).toBe(400);
   });
 
+  it('returns 400 when player2 matches the JWT address regardless of case', async () => {
+    const player1Address = 'GPLAYER1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+    const response = await request(app)
+      .post('/api/matches')
+      .set('Authorization', `Bearer ${makeToken(player1Address.toLowerCase())}`)
+      .send({
+        player2: player1Address,
+        stakeAmount: 100,
+        token: 'XLM',
+        gameId: 'lichess-game-abc123',
+        platform: 'lichess',
+      });
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('player1 and player2 must be different addresses');
+  });
+
   it('returns 400 when stakeAmount is missing', async () => {
     mockLichessGameFound('lichess-game-abc123');
     const response = await request(app)
@@ -107,6 +124,16 @@ describe('POST /api/matches', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', stakeAmount: 0, token: 'XLM', gameId: 'lichess-game-abc123', platform: 'lichess' });
     expect(response.status).toBe(400);
+  });
+
+  it('returns 400 when stakeAmount is not a whole number', async () => {
+    mockLichessGameFound('lichess-game-abc123');
+    const response = await request(app)
+      .post('/api/matches')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', stakeAmount: 1.5, token: 'XLM', gameId: 'lichess-game-abc123', platform: 'lichess' });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('stakeAmount must be a whole number of stroops');
   });
 
   it('returns 400 when gameId is missing', async () => {
@@ -199,5 +226,97 @@ describe('POST /api/matches', () => {
     expect(response.status).toBe(201);
     expect(response.body.gameId).toBe('chess-game-1');
     expect(response.body.platform).toBe('chessdotcom');
+  });
+
+  describe('JWT Authentication', () => {
+    it('returns 401 with error and message when no Authorization header', async () => {
+      const response = await request(app)
+        .post('/api/matches')
+        .send({});
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('unauthorized');
+      expect(response.body.message).toBeDefined();
+    });
+
+    it('returns 401 with error and message when Authorization header is malformed', async () => {
+      const response = await request(app)
+        .post('/api/matches')
+        .set('Authorization', 'Bearer invalid.token.structure')
+        .send({});
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('unauthorized');
+      expect(response.body.message).toBeDefined();
+    });
+
+    it('returns 401 with error and message when JWT has expired', async () => {
+      const expiredToken = jwt.sign(
+        { address: 'GPLAYER1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' },
+        secret,
+        { expiresIn: '-1h' }, // Expired 1 hour ago
+      );
+
+      const response = await request(app)
+        .post('/api/matches')
+        .set('Authorization', `Bearer ${expiredToken}`)
+        .send({});
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('unauthorized');
+      expect(response.body.message).toContain('expired');
+    });
+
+    it('returns 401 with error and message when JWT token lacks address claim', async () => {
+      const badToken = jwt.sign({ user_id: '12345' }, secret, { expiresIn: '1h' });
+
+      const response = await request(app)
+        .post('/api/matches')
+        .set('Authorization', `Bearer ${badToken}`)
+        .send({});
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe('unauthorized');
+      expect(response.body.message).toContain('Invalid');
+    });
+
+    it('successfully authenticates with valid JWT token', async () => {
+      mockLichessGameFound('lichess-game-abc123');
+      const validToken = makeToken();
+
+      const response = await request(app)
+        .post('/api/matches')
+        .set('Authorization', `Bearer ${validToken}`)
+        .send({
+          player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          stakeAmount: 100,
+          token: 'XLM',
+          gameId: 'lichess-game-abc123',
+          platform: 'lichess',
+        });
+
+      // Should not get 401, should proceed to validate request body
+      expect(response.status).not.toBe(401);
+    });
+
+    it('extracts address from JWT and uses it as player1', async () => {
+      mockLichessGameFound('lichess-game-xyz789');
+      const player1Address = 'GPLAYER1CUSTOM1111111111111111111111111111111111111111';
+      const token = jwt.sign({ address: player1Address }, secret, { expiresIn: '1h' });
+
+      const response = await request(app)
+        .post('/api/matches')
+        .set('Authorization', `Bearer ${token}`)
+        .send({
+          player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB',
+          stakeAmount: 100,
+          token: 'XLM',
+          gameId: 'lichess-game-xyz789',
+          platform: 'lichess',
+        });
+
+      expect(response.status).toBe(201);
+      expect(response.body.player1).toBe(player1Address);
+    });
   });
 });

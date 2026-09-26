@@ -16,7 +16,7 @@ extern crate std;
 
 use super::*;
 use soroban_sdk::{
-    testutils::{Address as _, Events},
+    testutils::{Address as _, Events, Ledger as _},
     token::{Client as TokenClient, StellarAssetClient},
     vec, Address, Env, IntoVal, String, Symbol, TryFromVal,
 };
@@ -47,7 +47,7 @@ fn setup_e2e() -> (Env, Address, Address, Address, Address, Address, Address, Ad
 
     let contract_id = env.register(EscrowContract, ());
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&oracle, &admin, &token_addr, &safe_address);
+    client.initialize(&oracle, &admin, &token_addr, &safe_address, &None, &None);
 
     // Approve the escrow contract for both players (needed for allowance check)
     let expiration = env.ledger().sequence() + 1000000;
@@ -774,7 +774,7 @@ fn test_e2e_override_result_then_finalize_payout_to_player2() {
     env.ledger().set_sequence_number(current + 17_281);
 
     // ── Step 5: Finalize result — payout goes to Player2 ────────────────────
-    client.finalize_result(&match_id);
+    client.finalize_result(&match_id, &player1);
 
     // ── Verify state ─────────────────────────────────────────────────────────
     let m = client.get_match(&match_id);
@@ -849,7 +849,7 @@ fn test_e2e_override_draw_to_player1_wins() {
     // Advance past dispute window and finalize
     let current = env.ledger().sequence();
     env.ledger().set_sequence_number(current + 17_281);
-    client.finalize_result(&match_id);
+    client.finalize_result(&match_id, &player1);
 
     assert_eq!(client.get_match(&match_id).state, MatchState::Completed);
     // Player1 wins the full pot
@@ -913,7 +913,7 @@ fn test_e2e_finalize_result_rejected_during_dispute_window() {
 
     // Dispute window is still open — finalize must be rejected
     assert_eq!(
-        client.try_finalize_result(&match_id),
+        client.try_finalize_result(&match_id, &player1),
         Err(Ok(Error::DisputeWindowActive)),
         "finalize_result must be rejected while the dispute window is open"
     );

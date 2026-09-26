@@ -21,6 +21,9 @@ declare global {
 
 const EXPECTED_NETWORK = (import.meta.env.VITE_STELLAR_NETWORK as string | undefined) || 'testnet';
 
+/** localStorage key used to persist the user's connection preference. */
+const WALLET_CONNECTED_KEY = 'wallet_connected';
+
 export function useWallet() {
   const [state, setState] = useState<WalletState>('checking');
   const [publicKey, setPublicKey] = useState<string | null>(null);
@@ -57,8 +60,24 @@ export function useWallet() {
     }
   }, []);
 
+  // On mount: if the user previously connected, attempt silent auto-reconnect.
+  // We only try if Freighter reports it is still connected — this avoids
+  // popping an unexpected permission prompt on a fresh session.
   useEffect(() => {
-    checkConnection();
+    const stored = localStorage.getItem(WALLET_CONNECTED_KEY);
+    if (stored === 'true') {
+      // Attempt auto-reconnect; checkConnection will set state appropriately
+      // if Freighter is no longer connected or the extension isn't installed.
+      checkConnection();
+    } else {
+      // No stored preference — resolve immediately so the UI isn't stuck in
+      // 'checking' state.
+      if (!window.stellar) {
+        setState('notInstalled');
+      } else {
+        setState('disconnected');
+      }
+    }
   }, [checkConnection]);
 
   const connect = useCallback(async () => {
@@ -87,8 +106,12 @@ export function useWallet() {
       if (net.network !== EXPECTED_NETWORK) {
         setState('wrongNetwork');
         setError(`Wrong network: expected ${EXPECTED_NETWORK}, got ${net.network}`);
+        // Still persist the preference — user is connected, just on wrong network
+        localStorage.setItem(WALLET_CONNECTED_KEY, 'true');
       } else {
         setState('connected');
+        // Persist the successful connection so we can auto-reconnect next session
+        localStorage.setItem(WALLET_CONNECTED_KEY, 'true');
       }
     } catch (err) {
       setState('disconnected');
@@ -112,6 +135,8 @@ export function useWallet() {
     setPublicKey(null);
     setNetwork(null);
     setError(null);
+    // Clear the stored preference so we don't auto-reconnect next session
+    localStorage.removeItem(WALLET_CONNECTED_KEY);
   }, []);
 
   return { state, publicKey, network, expectedNetwork, connect, switchNetwork, disconnect, error };

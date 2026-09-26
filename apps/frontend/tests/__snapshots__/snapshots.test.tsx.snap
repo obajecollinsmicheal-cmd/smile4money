@@ -101,6 +101,13 @@ exports[`ClaimBurn — snapshots > matches snapshot: connected state (claim mode
         Claim
       </button>
     </form>
+    <div
+      aria-atomic="true"
+      aria-live="polite"
+      class="rounded-lg p-3 text-sm font-medium transition-all duration-200 overflow-hidden hidden mt-4"
+      data-testid="claim-burn-status"
+      role="status"
+    />
   </div>
   <div
     aria-atomic="true"
@@ -188,6 +195,13 @@ exports[`ClaimBurn — snapshots > matches snapshot: connected state in burn mod
         Claim
       </button>
     </form>
+    <div
+      aria-atomic="true"
+      aria-live="polite"
+      class="rounded-lg p-3 text-sm font-medium transition-all duration-200 overflow-hidden hidden mt-4"
+      data-testid="claim-burn-status"
+      role="status"
+    />
   </div>
   <div
     aria-atomic="true"
@@ -322,6 +336,13 @@ exports[`ClaimBurn — snapshots > matches snapshot: connected state with public
         Claim
       </button>
     </form>
+    <div
+      aria-atomic="true"
+      aria-live="polite"
+      class="rounded-lg p-3 text-sm font-medium transition-all duration-200 overflow-hidden hidden mt-4"
+      data-testid="claim-burn-status"
+      role="status"
+    />
   </div>
   <div
     aria-atomic="true"

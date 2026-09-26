@@ -10,6 +10,7 @@ import {
   scValToNative,
 } from '@stellar/stellar-sdk';
 import type { xdr } from '@stellar/stellar-sdk';
+import { TransactionStatus } from './TransactionStatus';
 
 type DepositStatus = 'idle' | 'loading' | 'pending' | 'success' | 'error' | 'approving';
 type AllowanceStatus = 'unknown' | 'checking' | 'sufficient' | 'insufficient';
@@ -377,24 +378,16 @@ export function DepositStake({
               : 'Deposit Stake'}
       </button>
 
-      {/* Success */}
-      {status === 'success' && (
-        <p className="feedback success" role="status" data-testid="deposit-success">
-          Deposit successful!
-          {txHash && (
-            <span className="tx-hash" data-testid="deposit-tx-hash">
-              Tx: {txHash.slice(0, 8)}...{txHash.slice(-8)}
-            </span>
-          )}
-        </p>
-      )}
-
-      {/* Error */}
-      {status === 'error' && matchDetails && (
-        <p className="feedback error" role="alert" data-testid="deposit-error-msg">
-          {errorMsg}
-        </p>
-      )}
+      {/* Transaction status with aria-live announcements */}
+      <TransactionStatus
+        status={status === 'loading' ? 'idle' : (status as any)}
+        pendingMessage="Depositing stake…"
+        successMessage="Deposit successful!"
+        errorMessage={errorMsg}
+        txHash={txHash}
+        testId="deposit-status"
+        className="mt-4"
+      />
     </div>
   );
 }

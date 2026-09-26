@@ -3,6 +3,7 @@ import type { WalletStatus, Network } from '../types';
 import { useDebounce } from '../hooks/useDebounce';
 import { useToast } from './Toast';
 import { TxHash } from './TxHash';
+import { TransactionStatus } from './TransactionStatus';
 
 type Mode = 'claim' | 'burn';
 type Status = 'idle' | 'confirm' | 'pending' | 'success' | 'error';
@@ -500,35 +501,36 @@ export function ClaimBurn({
         )}
       </form>
 
-      {/* Feedback */}
-      {status === 'success' && (
-        <p
-          className="dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400 mt-4 rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-center text-sm font-medium text-emerald-800"
-          role="status"
-          data-testid="success-msg"
-        >
-          {mode === 'claim'
+      {/* Transaction status with aria-live announcements */}
+      <TransactionStatus
+        status={status as any}
+        pendingMessage={mode === 'claim' ? 'Claiming tokens…' : 'Burning tokens…'}
+        successMessage={
+          mode === 'claim'
             ? `${tokenSymbol} claimed successfully!`
-            : `${tokenSymbol} burned successfully!`}
-          {txHash && (
-            <a
-              href={`https://stellar.expert/explorer/${network === 'unknown' ? 'testnet' : network}/tx/${txHash}`}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="dark:text-violet-400 mt-2 block break-all font-mono text-xs text-violet-600 underline hover:no-underline"
-              data-testid="tx-hash"
-              aria-label={`View transaction ${txHash} on Stellar Expert`}
-            >
-              {txHash.slice(0, 8)}…{txHash.slice(-8)} ↗
-            </a>
-          )}
-        </p>
-      )}
-      {status === 'error' && (
-        <p className="feedback error" role="alert" data-testid="error-msg" id="claim-burn-error">
-          {errorMsg}
-        </p>
-      )}
+            : `${tokenSymbol} burned successfully!`
+        }
+        errorMessage={errorMsg}
+        txHash={txHash}
+        testId="claim-burn-status"
+        className="mt-4"
+        renderTxHashLink={
+          txHash
+            ? (hash) => (
+                <a
+                  href={`https://stellar.expert/explorer/${network === 'unknown' ? 'testnet' : network}/tx/${hash}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="dark:text-blue-300 dark:hover:text-blue-200 break-all font-mono text-xs underline hover:no-underline"
+                  data-testid="tx-hash"
+                  aria-label={`View transaction ${hash} on Stellar Expert`}
+                >
+                  {hash.slice(0, 8)}…{hash.slice(-8)} ↗
+                </a>
+              )
+            : undefined
+        }
+      />
     </div>
   );
 }

@@ -410,7 +410,11 @@ mod tests {
             invoke: &MockAuthInvoke {
                 contract: &contract_id,
                 fn_name: "submit_result",
-                args: (1u64, String::from_str(&env, "game1"), MatchResult::Player1Wins)
+                args: (
+                    1u64,
+                    String::from_str(&env, "game1"),
+                    MatchResult::Player1Wins,
+                )
                     .into_val(&env),
                 sub_invokes: &[],
             },
@@ -418,11 +422,18 @@ mod tests {
 
         assert!(
             client
-                .try_submit_result(&1u64, &String::from_str(&env, "game1"), &MatchResult::Player1Wins)
+                .try_submit_result(
+                    &1u64,
+                    &String::from_str(&env, "game1"),
+                    &MatchResult::Player1Wins
+                )
                 .is_err(),
             "non-admin must not be able to submit results"
         );
-        assert!(!client.has_result(&1u64), "result must not be stored after rejected submission");
+        assert!(
+            !client.has_result(&1u64),
+            "result must not be stored after rejected submission"
+        );
     }
 
     #[test]
@@ -587,8 +598,16 @@ mod tests {
         let (ev_match_id, ev_game_id, ev_result): (u64, String, MatchResult) =
             soroban_sdk::TryFromVal::try_from_val(&env, &actual_data).unwrap();
         assert_eq!(ev_match_id, 1u64, "match_id mismatch for Player1Wins");
-        assert_eq!(ev_game_id, String::from_str(&env, "game_abc"), "game_id mismatch for Player1Wins");
-        assert_eq!(ev_result, MatchResult::Player1Wins, "result mismatch for Player1Wins");
+        assert_eq!(
+            ev_game_id,
+            String::from_str(&env, "game_abc"),
+            "game_id mismatch for Player1Wins"
+        );
+        assert_eq!(
+            ev_result,
+            MatchResult::Player1Wins,
+            "result mismatch for Player1Wins"
+        );
     }
 
     #[test]
@@ -623,8 +642,16 @@ mod tests {
         let (ev_match_id, ev_game_id, ev_result): (u64, String, MatchResult) =
             soroban_sdk::TryFromVal::try_from_val(&env, &actual_data).unwrap();
         assert_eq!(ev_match_id, 2u64, "match_id mismatch for Player2Wins");
-        assert_eq!(ev_game_id, String::from_str(&env, "game_abc"), "game_id mismatch for Player2Wins");
-        assert_eq!(ev_result, MatchResult::Player2Wins, "result mismatch for Player2Wins");
+        assert_eq!(
+            ev_game_id,
+            String::from_str(&env, "game_abc"),
+            "game_id mismatch for Player2Wins"
+        );
+        assert_eq!(
+            ev_result,
+            MatchResult::Player2Wins,
+            "result mismatch for Player2Wins"
+        );
     }
 
     #[test]
@@ -659,7 +686,11 @@ mod tests {
         let (ev_match_id, ev_game_id, ev_result): (u64, String, MatchResult) =
             soroban_sdk::TryFromVal::try_from_val(&env, &actual_data).unwrap();
         assert_eq!(ev_match_id, 3u64, "match_id mismatch for Draw");
-        assert_eq!(ev_game_id, String::from_str(&env, "game_abc"), "game_id mismatch for Draw");
+        assert_eq!(
+            ev_game_id,
+            String::from_str(&env, "game_abc"),
+            "game_id mismatch for Draw"
+        );
         assert_eq!(ev_result, MatchResult::Draw, "result mismatch for Draw");
     }
 

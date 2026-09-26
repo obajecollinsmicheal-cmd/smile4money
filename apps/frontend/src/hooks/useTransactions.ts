@@ -17,6 +17,8 @@ export interface CreateMatchInput {
   platform: 'lichess' | 'chesscom';
 }
 
+type ClaimBurnMode = 'claim' | 'burn';
+
 function getNetworkPassphrase(network: Network): string {
   return NETWORK_PASSPHRASES[network] ?? Networks.TESTNET;
 }
@@ -67,6 +69,24 @@ export function useTransactions(address: string | null, network: Network) {
     return signAndSubmitTransaction(mockTxXdr, network);
   };
 
+  const handleSimulateClaimBurn = async (
+    mode: ClaimBurnMode,
+    amount: string,
+  ): Promise<{ minResourceFee?: string; error?: string }> => {
+    requireWallet();
+    const mockTxXdr = `AAAA...${mode}.${amount}`;
+    const networkPassphrase = getNetworkPassphrase(network);
+    const server = new rpc.Server(RPC_URL);
+    const transaction = new Transaction(mockTxXdr, networkPassphrase);
+    const result = await server.simulateTransaction(transaction);
+
+    if ('error' in result) {
+      return { error: `Transaction simulation failed: ${result.error}` };
+    }
+
+    return { minResourceFee: result.minResourceFee };
+  };
+
   const handleBurn = async (amount: string): Promise<string | void> => {
     requireWallet();
     console.info('Burn request', amount);
@@ -89,5 +109,5 @@ export function useTransactions(address: string | null, network: Network) {
     await signAndSubmitTransaction(mockTxXdr, network);
   };
 
-  return { handleClaim, handleBurn, handleCreateMatch, handleDeposit };
+  return { handleClaim, handleBurn, handleSimulateClaimBurn, handleCreateMatch, handleDeposit };
 }

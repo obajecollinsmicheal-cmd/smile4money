@@ -38,10 +38,22 @@ cargo build --target wasm32-unknown-unknown --release
 cargo test
 ```
 
-Run clippy before opening a PR:
+Run formatters and clippy before opening a PR:
 
 ```bash
+cargo fmt --all
+cargo fmt --all --check
 cargo clippy -- -D warnings
+
+cd apps/frontend
+npm ci
+npm run format
+npm run format:check
+
+cd ../backend
+npm ci
+npm run format
+npm run format:check
 ```
 
 ## Branch Naming
@@ -83,8 +95,9 @@ docs: add contributing guide
 1. Push your branch and open a PR against `master`.
 2. Link the issue in the PR body using `Closes #<N>`.
 3. Keep the PR title under 70 characters.
-4. Ensure `cargo test` and `cargo clippy -- -D warnings` pass — CI will check both.
-5. Add a brief description of what changed and how it was tested.
+4. Ensure `cargo test`, `cargo fmt --all --check`, and `cargo clippy -- -D warnings` pass — CI will check all of them.
+5. Ensure `npm run format:check` passes in both `apps/frontend` and `apps/backend`.
+6. Add a brief description of what changed and how it was tested.
 
 ## Branch Protection Rules
 

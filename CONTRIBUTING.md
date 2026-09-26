@@ -42,10 +42,22 @@ cargo build --target wasm32-unknown-unknown --release
 cargo test
 ```
 
-Run lints before opening a PR:
+Run formatters and lints before opening a PR:
 
 ```bash
+cargo fmt --all
+cargo fmt --all --check
 cargo clippy -- -D warnings
+
+cd apps/frontend
+npm ci
+npm run format
+npm run format:check
+
+cd ../backend
+npm ci
+npm run format
+npm run format:check
 ```
 
 ## Branch Naming
@@ -88,6 +100,8 @@ refactor: move shared deps to workspace-level Cargo.toml
 Before submitting a PR, confirm:
 
 - [ ] `cargo test` passes
+- [ ] `cargo fmt --all --check` passes
+- [ ] `npm run format:check` passes in both `apps/frontend` and `apps/backend`
 - [ ] `cargo clippy -- -D warnings` passes
 - [ ] Branch is up to date with `master`
 - [ ] PR title is under 70 characters

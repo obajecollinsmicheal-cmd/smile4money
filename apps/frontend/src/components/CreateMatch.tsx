@@ -1,5 +1,6 @@
 import React, { useState, useCallback } from 'react';
 import { Address, Networks } from '@stellar/stellar-sdk';
+import { validateAndConvertXlmToStroops, countDecimalPlaces } from '../utils/xlm-precision';
 
 type Platform = 'lichess' | 'chesscom';
 type TokenType = 'xlm' | 'usdc';
@@ -42,6 +43,7 @@ interface FormData {
 interface FormErrors {
   player2?: string;
   stakeAmount?: string;
+  stakeAmountWarning?: string;
   gameId?: string;
   platformUsername?: string;
   gameValidation?: string;
@@ -79,15 +81,20 @@ function validateForm(data: FormData, knownGameIds: string[] = []): FormErrors {
     errors.stakeAmount = 'Stake amount is required';
   } else {
     const raw = data.stakeAmount.trim();
-    // Reject fractional values — stake_amount is always a whole-number stroop count.
-    if (!/^\d+$/.test(raw)) {
-      errors.stakeAmount = 'Stake amount must be a whole number of stroops';
-    } else {
-      const amount = BigInt(raw);
-      if (amount < MIN_STAKE_STROOPS) {
-        errors.stakeAmount = `Stake amount must be at least 1 stroop`;
-      } else if (amount > MAX_STAKE_STROOPS) {
-        errors.stakeAmount = `Stake amount must be at most ${MAX_STAKE_STROOPS.toLocaleString()} stroops`;
+    const validation = validateAndConvertXlmToStroops(raw);
+    
+    if (!validation.valid) {
+      errors.stakeAmount = validation.message || 'Invalid stake amount';
+    } else if (validation.stroops !== undefined) {
+      // Check bounds
+      if (validation.stroops < MIN_STAKE_STROOPS) {
+        errors.stakeAmount = `Stake amount must be at least 1 stroop (${(1n / BigInt(10_000_000)).toString()} XLM)`;
+      } else if (validation.stroops > MAX_STAKE_STROOPS) {
+        errors.stakeAmount = `Stake amount must be at most ${(MAX_STAKE_STROOPS / BigInt(10_000_000)).toString()} XLM`;
+      }
+      // Set warning if decimal places were provided but capped at 7
+      if (validation.decimals === 7) {
+        errors.stakeAmountWarning = 'Precision capped at 7 decimal places (1 stroop minimum).';
       }
     }
   }
@@ -260,9 +267,15 @@ export function CreateMatch({
       setStatus('pending');
 
       try {
+        // Convert decimal XLM to stroops
+        const stakeValidation = validateAndConvertXlmToStroops(formData.stakeAmount.trim());
+        if (!stakeValidation.valid || stakeValidation.stroops === undefined) {
+          throw new Error('Invalid stake amount');
+        }
+
         const result = await onCreateMatch?.({
           player2: formData.player2,
-          stakeAmount: formData.stakeAmount,
+          stakeAmount: stakeValidation.stroops.toString(),
           token,
           gameId: formData.gameId,
           platform: formData.platform,
@@ -376,23 +389,26 @@ export function CreateMatch({
 
           {/* Stake Amount */}
           <div className="form-group">
-            <label htmlFor="stake-amount">Stake Amount (stroops)</label>
+            <label htmlFor="stake-amount">Stake Amount (XLM)</label>
             <input
               id="stake-amount"
-              type="number"
-              min="1"
-              max="10000000000000"
-              step="1"
+              type="text"
+              inputMode="decimal"
               value={formData.stakeAmount}
               onChange={(e) => validateAndUpdate('stakeAmount', e.target.value)}
               disabled={isBusy}
-              placeholder="e.g. 10000000 (= 1 XLM)"
+              placeholder="e.g. 1.5 (converts to 15,000,000 stroops)"
               data-testid="stake-amount-input"
               aria-invalid={!!errors.stakeAmount}
             />
             {errors.stakeAmount && (
               <span className="error-message" data-testid="stake-amount-error">
                 {errors.stakeAmount}
+              </span>
+            )}
+            {errors.stakeAmountWarning && !errors.stakeAmount && (
+              <span className="warning-message" data-testid="stake-amount-warning">
+                ⚠️ {errors.stakeAmountWarning}
               </span>
             )}
           </div>

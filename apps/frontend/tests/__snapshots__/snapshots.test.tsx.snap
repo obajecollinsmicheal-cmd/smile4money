@@ -597,17 +597,15 @@ exports[`CreateMatch — snapshots > matches snapshot: Chess.com platform select
         <label
           for="stake-amount"
         >
-          Stake Amount (stroops)
+          Stake Amount (XLM)
         </label>
         <input
           aria-invalid="false"
           data-testid="stake-amount-input"
           id="stake-amount"
-          max="10000000000000"
-          min="1"
-          placeholder="e.g. 10000000 (= 1 XLM)"
-          step="1"
-          type="number"
+          inputmode="decimal"
+          placeholder="e.g. 1.5 (converts to 15,000,000 stroops)"
+          type="text"
           value=""
         />
       </div>
@@ -737,17 +735,15 @@ exports[`CreateMatch — snapshots > matches snapshot: USDC token selected 1`] =
         <label
           for="stake-amount"
         >
-          Stake Amount (stroops)
+          Stake Amount (XLM)
         </label>
         <input
           aria-invalid="false"
           data-testid="stake-amount-input"
           id="stake-amount"
-          max="10000000000000"
-          min="1"
-          placeholder="e.g. 10000000 (= 1 XLM)"
-          step="1"
-          type="number"
+          inputmode="decimal"
+          placeholder="e.g. 1.5 (converts to 15,000,000 stroops)"
+          type="text"
           value=""
         />
       </div>
@@ -877,17 +873,15 @@ exports[`CreateMatch — snapshots > matches snapshot: default state (XLM / Lich
         <label
           for="stake-amount"
         >
-          Stake Amount (stroops)
+          Stake Amount (XLM)
         </label>
         <input
           aria-invalid="false"
           data-testid="stake-amount-input"
           id="stake-amount"
-          max="10000000000000"
-          min="1"
-          placeholder="e.g. 10000000 (= 1 XLM)"
-          step="1"
-          type="number"
+          inputmode="decimal"
+          placeholder="e.g. 1.5 (converts to 15,000,000 stroops)"
+          type="text"
           value=""
         />
       </div>

@@ -31,7 +31,7 @@
     "prettier": "3.8.4",
     "stellar-sdk": "10.3.0",
     "supertest": "6.3.4",
-    "tsx": "^4.23.12",
+    "tsx": "^4.23.15",
     "typescript": "5.9.3",
     "vitest": "0.34.6"
   }

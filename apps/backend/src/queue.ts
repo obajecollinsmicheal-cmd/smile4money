@@ -15,6 +15,7 @@
 /* Import already at the top level */
 import { getCircuitBreaker, CircuitState } from "./services/circuit-breaker.js";
 import { InMemoryQueueStore } from "./store/in-memory-queue-store.js";
+import { SQLiteQueueStore } from "./store/sqlite-queue-store.js";
 import type {
   DlqEntry,
   PersistentQueueStore,
@@ -34,25 +35,73 @@ const logger = {
 
 let queueStore: PersistentQueueStore | null = null;
 
+export type QueueStoreType = "memory" | "sqlite";
+
+/**
+ * Decide which queue store implementation to use for a given QUEUE_STORE
+ * value and NODE_ENV, without touching disk. Exported for unit testing.
+ *
+ *   'sqlite' / 'auto' / unset → sqlite (durable; the default)
+ *   'mongodb'                 → sqlite (mongoose is not an installed dependency)
+ *   'memory'                  → memory, EXCEPT in production, where it is
+ *                                auto-corrected to sqlite so DLQ entries
+ *                                cannot silently be lost on restart.
+ */
+export function resolveQueueStoreType(
+  rawQueueStore: string | undefined,
+  nodeEnv: string | undefined,
+): QueueStoreType {
+  const requested = (rawQueueStore || "auto").toLowerCase();
+
+  if (requested === "memory" && nodeEnv !== "production") {
+    return "memory";
+  }
+
+  return "sqlite";
+}
+
 /**
  * Initialise the queue store based on the QUEUE_STORE environment variable.
  * Must be called once on application startup before any other queue function.
  *
- * QUEUE_STORE values:
- *   memory | auto (default) → InMemoryQueueStore
+ * See resolveQueueStoreType() for how QUEUE_STORE is resolved. In-memory
+ * mode is never durable across restarts, so it always logs a warning, and
+ * NODE_ENV=production silently requesting it is auto-corrected to SQLite
+ * (see docs/oracle.md#queue-store-persistence).
  */
 export async function initializeQueue(): Promise<void> {
-  const storeType = process.env.QUEUE_STORE || "auto";
+  const rawQueueStore = process.env.QUEUE_STORE;
+  const nodeEnv = process.env.NODE_ENV;
+  const requested = (rawQueueStore || "auto").toLowerCase();
+  const resolved = resolveQueueStoreType(rawQueueStore, nodeEnv);
 
-  if (storeType === "memory" || storeType === "auto") {
-    queueStore = new InMemoryQueueStore();
-  } else {
-    // Future: resolve SQLite / MongoDB stores here
-    queueStore = new InMemoryQueueStore();
+  if (requested === "mongodb") {
+    logger.warn(
+      { requested },
+      "oracle_dlq: QUEUE_STORE=mongodb requested but the mongoose dependency is not installed; falling back to sqlite",
+    );
   }
 
+  if (requested === "memory" && resolved === "sqlite") {
+    logger.warn(
+      { requested, nodeEnv },
+      "oracle_dlq: QUEUE_STORE=memory is not safe in production (DLQ entries are lost on restart); auto-falling back to sqlite. See docs/oracle.md#queue-store-persistence.",
+    );
+  }
+
+  queueStore =
+    resolved === "memory" ? new InMemoryQueueStore() : new SQLiteQueueStore();
+
   await queueStore.initialize();
-  logger.info({}, "oracle_dlq: queue store initialized");
+
+  if (resolved === "memory") {
+    logger.warn(
+      {},
+      "oracle_dlq: using in-memory queue store -- DLQ entries will NOT survive a process restart. Not recommended outside local development; see docs/oracle.md#queue-store-persistence.",
+    );
+  }
+
+  logger.info({ store: resolved }, "oracle_dlq: queue store initialized");
 }
 
 /**
@@ -229,4 +278,67 @@ export async function closeQueue(): Promise<void> {
     await queueStore.close();
     queueStore = null;
   }
+}
+
+const DEFAULT_DLQ_TTL_DAYS = 7;
+const DEFAULT_DLQ_EVICTION_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+
+/**
+ * Parse the DLQ_TTL_DAYS environment variable, falling back to the default
+ * (7 days) when unset or invalid (non-numeric, zero, or negative).
+ */
+export function parseDlqTtlDays(rawValue: string | undefined): number {
+  if (rawValue === undefined || rawValue.trim() === "") {
+    return DEFAULT_DLQ_TTL_DAYS;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn(
+      { rawValue },
+      "oracle_dlq: invalid DLQ_TTL_DAYS, falling back to default of 7 days",
+    );
+    return DEFAULT_DLQ_TTL_DAYS;
+  }
+
+  return parsed;
+}
+
+/**
+ * Delete DLQ entries older than the configured TTL (DLQ_TTL_DAYS, default 7
+ * days). Logs the number of entries deleted. Returns that count.
+ */
+export async function evictExpiredDlqEntries(
+  ttlDays: number = parseDlqTtlDays(process.env.DLQ_TTL_DAYS),
+): Promise<number> {
+  const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
+  const entries = await listDlqEntries();
+  const expired = entries.filter((entry) => entry.createdAt < cutoff);
+
+  for (const entry of expired) {
+    await removeDlqEntry(entry.id);
+  }
+
+  logger.info(
+    { deleted: expired.length, ttlDays },
+    "oracle_dlq: TTL eviction run complete",
+  );
+
+  return expired.length;
+}
+
+/**
+ * Start the periodic DLQ TTL eviction task. Call once on startup.
+ * Returns a cleanup function that stops the task.
+ */
+export function startDlqEvictionTask(
+  intervalMs = DEFAULT_DLQ_EVICTION_INTERVAL_MS,
+): () => void {
+  const timer = setInterval(() => {
+    evictExpiredDlqEntries().catch((err) => {
+      logger.error({ err: String(err) }, "oracle_dlq: TTL eviction run failed");
+    });
+  }, intervalMs);
+
+  return () => clearInterval(timer);
 }

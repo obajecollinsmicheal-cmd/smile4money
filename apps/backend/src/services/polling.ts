@@ -17,6 +17,43 @@
 import logger from '../logger.js';
 import type { MatchResult, GameResult } from '../fetchers/lichess.js';
 
+/** Used when POLLING_INTERVAL_MS is unset. */
+const DEFAULT_POLLING_INTERVAL_MS = 30_000;
+
+/**
+ * Parses and validates the POLLING_INTERVAL_MS environment variable (#34).
+ *
+ * Returns DEFAULT_POLLING_INTERVAL_MS when `rawValue` is undefined or empty
+ * (the env var was not set). Throws a clear, actionable error for anything
+ * else that isn't a finite, positive number — a non-numeric value, zero, or
+ * a negative number would otherwise reach `setTimeout` as `NaN` or `<= 0`,
+ * either firing immediately or looping the polling cycle far faster than
+ * intended and hammering the chess-platform APIs. Callers (see server.ts)
+ * are expected to let this throw during startup rather than catch it, so a
+ * misconfigured deployment fails loudly instead of silently mis-polling.
+ */
+export function parsePollingIntervalMs(rawValue: string | undefined): number {
+  if (rawValue === undefined || rawValue.trim() === '') {
+    return DEFAULT_POLLING_INTERVAL_MS;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(
+      `Invalid POLLING_INTERVAL_MS: "${rawValue}" is not a valid number. ` +
+        'Expected a positive integer number of milliseconds, e.g. 30000.',
+    );
+  }
+  if (parsed <= 0) {
+    throw new Error(
+      `Invalid POLLING_INTERVAL_MS: ${parsed} must be greater than 0. ` +
+        'Expected a positive integer number of milliseconds, e.g. 30000.',
+    );
+  }
+
+  return parsed;
+}
+
 export interface PollJob {
   id: string;
   matchId: number;
@@ -74,7 +111,7 @@ export interface PollingConfig {
  *   - Linear backoff (multiplier=1.1): 30s, 33s, 36.3s, ...
  *   - Exponential backoff (multiplier=1.5): 30s, 45s, 67.5s, ...
  */
-function calculateNextPollDelay(
+export function calculateNextPollDelay(
   attempt: number,
   baseIntervalMs: number,
   backoffMultiplier: number,
@@ -447,4 +484,5 @@ export default {
   PollingJobStore,
   PollingWorker,
   calculateNextPollDelay,
+  parsePollingIntervalMs,
 };

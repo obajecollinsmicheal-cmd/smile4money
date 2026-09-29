@@ -7,6 +7,7 @@
 
 import sqlite3 from "sqlite3";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import type {
   DlqEntry,
@@ -34,6 +35,12 @@ export class SQLiteQueueStore implements PersistentQueueStore {
   }
 
   async initialize(): Promise<void> {
+    // Ensure the data directory exists
+    const dir = path.dirname(this.dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
     return new Promise((resolve, reject) => {
       this.db = new sqlite3.Database(this.dbPath, (err: Error | null) => {
         if (err) {

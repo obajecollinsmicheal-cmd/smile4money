@@ -121,6 +121,20 @@ CONTRACT_ORACLE=<your-contract-id>
 LICHESS_API_TOKEN=<your-lichess-api-token>
 CHESSDOTCOM_API_KEY=<your-chessdotcom-api-key>
 
+# Game polling (backend). POLLING_INTERVAL_MS defaults to 30000 (30s) when
+# unset; a non-numeric, zero, or negative value fails startup with a clear
+# error instead of silently mis-polling. See docs/oracle.md for the full
+# polling/backoff/DLQ configuration reference.
+POLLING_INTERVAL_MS=30000
+
+# Oracle dead-letter queue (backend). QUEUE_STORE defaults to a durable
+# SQLite store; QUEUE_STORE=memory is dev-only and is auto-corrected to
+# SQLite when NODE_ENV=production. DLQ_TTL_DAYS controls how long entries
+# are kept before a background task evicts them (default 7 days).
+# See docs/oracle.md#queue-store-persistence.
+QUEUE_STORE=auto
+DLQ_TTL_DAYS=7
+
 # Frontend configuration
 VITE_STELLAR_NETWORK=testnet
 VITE_STELLAR_RPC_URL=https://soroban-testnet.stellar.org

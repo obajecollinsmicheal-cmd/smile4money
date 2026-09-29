@@ -7,19 +7,31 @@ import {
   updateDlqEntry,
   initializeQueue,
   closeQueue,
+  resolveQueueStoreType,
+  parseDlqTtlDays,
+  evictExpiredDlqEntries,
   type DlqEntry,
 } from "../src/queue.js";
 import { resetCircuitBreaker } from "../src/services/circuit-breaker.js";
 
-// Reset the in-memory store between tests by removing all entries
-function clearDlq() {
-  for (const entry of listDlqEntries()) {
-    removeDlqEntry(entry.id);
+// Reset the in-memory store between tests by removing all entries.
+// listDlqEntries/removeDlqEntry are async, and the queue store is not
+// initialized yet the first time this outer beforeEach runs (that happens in
+// the describe-level beforeEach below, which runs after this one) -- so this
+// swallows the "not initialized" error rather than failing every test.
+async function clearDlq() {
+  try {
+    const entries = await listDlqEntries();
+    for (const entry of entries) {
+      await removeDlqEntry(entry.id);
+    }
+  } catch {
+    // Queue store not initialized yet for this test group -- nothing to clear.
   }
 }
 
-beforeEach(() => {
-  clearDlq();
+beforeEach(async () => {
+  await clearDlq();
   resetCircuitBreaker();
   vi.useFakeTimers();
 });
@@ -124,7 +136,11 @@ describe('Persistent Queue System', () => {
       expect(await listDlqEntries()).toHaveLength(1);
     });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    it('removes only the specified entry when multiple exist', async () => {
+      const entry1 = await writeToDlq({ matchId: 1 }, 'err1');
+      const entry2 = await writeToDlq({ matchId: 2 }, 'err2');
+
+      await vi.advanceTimersByTimeAsync(1000);
 
       await removeDlqEntry(entry1.id);
 
@@ -155,7 +171,7 @@ describe('Persistent Queue System', () => {
       const entry = await writeToDlq({}, 'test');
       const timestamp = Date.now();
 
-    await vi.advanceTimersByTimeAsync(1000);
+      await updateDlqEntry(entry.id, { attempts: 5, lastAttemptAt: timestamp });
 
       const updated = (await listDlqEntries())[0];
       expect(updated.attempts).toBe(5);
@@ -216,7 +232,10 @@ describe('Persistent Queue System', () => {
       }
     });
 
-    await vi.advanceTimersByTimeAsync(1000);
+    it('increments attempts count across multiple retry cycles', async () => {
+      await writeToDlq({ matchId: 1 }, 'test');
+      const handler = vi.fn().mockRejectedValue(new Error('still failing'));
+      const stop = startRetryWorker(handler, 1000);
 
       try {
         await vi.advanceTimersByTimeAsync(1000);
@@ -475,5 +494,100 @@ describe('Persistent Queue System', () => {
       // Non-RPC errors should not affect circuit breaker
       stop();
     });
+  });
+
+  describe('DLQ TTL eviction (#36)', () => {
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    afterEach(() => {
+      delete process.env.DLQ_TTL_DAYS;
+    });
+
+    it('evicts only entries older than the TTL', async () => {
+      const oldEntry = await writeToDlq({ matchId: 1 }, 'old failure');
+      const newEntry = await writeToDlq({ matchId: 2 }, 'recent failure');
+
+      await updateDlqEntry(oldEntry.id, { createdAt: Date.now() - 8 * DAY_MS });
+      await updateDlqEntry(newEntry.id, { createdAt: Date.now() - 1 * DAY_MS });
+
+      const deletedCount = await evictExpiredDlqEntries(7);
+      expect(deletedCount).toBe(1);
+
+      const remaining = await listDlqEntries();
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].id).toBe(newEntry.id);
+    });
+
+    it('evicts nothing when all entries are within the TTL', async () => {
+      await writeToDlq({ matchId: 1 }, 'recent failure');
+
+      const deletedCount = await evictExpiredDlqEntries(7);
+      expect(deletedCount).toBe(0);
+      expect(await listDlqEntries()).toHaveLength(1);
+    });
+
+    it('uses DLQ_TTL_DAYS from the environment when no ttlDays argument is passed', async () => {
+      process.env.DLQ_TTL_DAYS = '1';
+
+      const oldEntry = await writeToDlq({ matchId: 1 }, 'old failure');
+      await updateDlqEntry(oldEntry.id, { createdAt: Date.now() - 2 * DAY_MS });
+
+      const deletedCount = await evictExpiredDlqEntries();
+      expect(deletedCount).toBe(1);
+    });
+  });
+});
+
+describe('parseDlqTtlDays (#36)', () => {
+  it('returns the default (7) when unset', () => {
+    expect(parseDlqTtlDays(undefined)).toBe(7);
+  });
+
+  it('returns the default (7) when blank', () => {
+    expect(parseDlqTtlDays('   ')).toBe(7);
+  });
+
+  it('parses a valid positive number', () => {
+    expect(parseDlqTtlDays('14')).toBe(14);
+  });
+
+  it('falls back to the default for a non-numeric value', () => {
+    expect(parseDlqTtlDays('abc')).toBe(7);
+  });
+
+  it('falls back to the default for zero', () => {
+    expect(parseDlqTtlDays('0')).toBe(7);
+  });
+
+  it('falls back to the default for a negative value', () => {
+    expect(parseDlqTtlDays('-3')).toBe(7);
+  });
+});
+
+describe('resolveQueueStoreType (#35)', () => {
+  it('defaults to sqlite when QUEUE_STORE is unset', () => {
+    expect(resolveQueueStoreType(undefined, 'development')).toBe('sqlite');
+  });
+
+  it('resolves auto to sqlite', () => {
+    expect(resolveQueueStoreType('auto', 'development')).toBe('sqlite');
+  });
+
+  it('resolves sqlite to sqlite', () => {
+    expect(resolveQueueStoreType('sqlite', 'development')).toBe('sqlite');
+  });
+
+  it('resolves mongodb to sqlite (mongoose is not an installed dependency)', () => {
+    expect(resolveQueueStoreType('mongodb', 'development')).toBe('sqlite');
+  });
+
+  it('resolves memory to memory outside production', () => {
+    expect(resolveQueueStoreType('memory', 'development')).toBe('memory');
+    expect(resolveQueueStoreType('memory', 'test')).toBe('memory');
+    expect(resolveQueueStoreType('memory', undefined)).toBe('memory');
+  });
+
+  it('auto-corrects memory to sqlite in production', () => {
+    expect(resolveQueueStoreType('memory', 'production')).toBe('sqlite');
   });
 });

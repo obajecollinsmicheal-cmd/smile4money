@@ -26,6 +26,7 @@ export interface HealthOk {
     status: 'ok';
     uptime: number;
     version: string;
+    dependencies?: { stellar_rpc: 'ok' };
     limiters?: ReturnType<typeof getAllLimiterStats>;
   };
 }
@@ -37,6 +38,7 @@ export interface HealthError {
     uptime: number;
     version: string;
     error: string;
+    dependencies: { stellar_rpc: 'unreachable' };
   };
 }
 
@@ -66,6 +68,7 @@ export async function runHealthCheck(options: HealthCheckOptions): Promise<Healt
           uptime: uptimeSeconds,
           version,
           error: error instanceof Error ? error.message : 'rpc unreachable',
+          dependencies: { stellar_rpc: 'unreachable' },
         },
       };
     }
@@ -76,6 +79,10 @@ export async function runHealthCheck(options: HealthCheckOptions): Promise<Healt
     uptime: uptimeSeconds,
     version,
   };
+
+  if (deepCheck) {
+    payload.dependencies = { stellar_rpc: 'ok' };
+  }
 
   if (includeLimiters) {
     payload.limiters = getAllLimiterStats();

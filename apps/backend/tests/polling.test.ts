@@ -123,12 +123,27 @@ describe('Game Polling System', () => {
       expect(job.platform).toBe('chessdotcom');
     });
 
-    it('throws when creating duplicate job for same matchId', () => {
+    // #46 — dedup key is (matchId, gameId), not matchId alone
+    it('throws when creating a duplicate job for the same (matchId, gameId) pair', () => {
       store.createJob(1, 'game-123', 'lichess');
 
       expect(() => {
+        store.createJob(1, 'game-123', 'lichess');
+      }).toThrow('Polling job already exists for match 1 (game game-123)');
+    });
+
+    it('treats the same matchId with a different gameId as a distinct job', () => {
+      // e.g. a cancelled match's matchId reused by a new match after a counter reset.
+      const first = store.createJob(1, 'game-123', 'lichess');
+
+      expect(() => {
         store.createJob(1, 'game-456', 'lichess');
-      }).toThrow('Polling job already exists for match 1');
+      }).not.toThrow();
+
+      const second = store.getJobByMatchId(1);
+      expect(second).not.toBeNull();
+      expect(second?.gameId).toBe('game-456');
+      expect(first.id).not.toBe(second?.id);
     });
 
     it('retrieves job by ID', () => {

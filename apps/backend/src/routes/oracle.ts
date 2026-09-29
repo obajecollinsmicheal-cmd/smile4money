@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { matchStore } from '../store/index.js';
 import { authenticate } from '../middleware/auth.js';
 import { validateSubmitResultInput, verifyGameResult } from '../services/oracle-service.js';
+import { errorToHttpStatus } from '../errors/errorToHttpStatus.js';
 
 const router = Router();
 const store = matchStore;
@@ -71,7 +72,9 @@ router.post('/submit-result', async (req, res) => {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
-    return res.status(500).json({
+    // #47 — mapped centrally so e.g. an upstream RateLimitError surfaces as
+    // 429 here instead of always flattening to 500.
+    return res.status(errorToHttpStatus(error)).json({
       error: 'Result verification failed',
       details: message,
     });

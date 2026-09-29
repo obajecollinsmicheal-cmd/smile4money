@@ -12,6 +12,7 @@ import { fetchLichessResult, GameNotFoundError } from '../fetchers/lichess.js';
 import { fetchChessDotComResult } from '../fetchers/chessdotcom.js';
 import type { MatchRecord } from '../store/match-store.js';
 import type { MatchStore } from '../store/match-store.js';
+import { errorToHttpStatus, ValidationError, ConflictError } from '../errors/errorToHttpStatus.js';
 
 export interface GameValidationResult {
   valid: boolean;
@@ -161,14 +162,19 @@ export async function createMatchForPlayer(
 ): Promise<CreateMatchResult> {
   const validationError = validateCreateMatchInput(player1, input);
   if (validationError) {
-    return { ok: false, status: 400, error: validationError };
+    return { ok: false, status: errorToHttpStatus(new ValidationError(validationError)), error: validationError };
   }
 
   const { player2, stakeAmount, token, gameId, platform, username } = input;
 
   const gameResult = await getGameResultWithPlayerIdentities(platform, gameId, username);
   if (gameResult.error) {
-    return { ok: false, status: 400, error: 'Invalid game', details: gameResult.error };
+    return {
+      ok: false,
+      status: errorToHttpStatus(new ValidationError(gameResult.error)),
+      error: 'Invalid game',
+      details: gameResult.error,
+    };
   }
 
   try {
@@ -186,8 +192,8 @@ export async function createMatchForPlayer(
   } catch (error) {
     const message = error instanceof Error ? error.message : 'Unknown error';
     if (message.includes('duplicate')) {
-      return { ok: false, status: 409, error: 'duplicate gameId' };
+      return { ok: false, status: errorToHttpStatus(new ConflictError(message)), error: 'duplicate gameId' };
     }
-    return { ok: false, status: 500, error: message };
+    return { ok: false, status: errorToHttpStatus(error), error: message };
   }
 }

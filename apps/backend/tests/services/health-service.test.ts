@@ -66,6 +66,26 @@ describe('runHealthCheck', () => {
     expect(result.ok).toBe(true);
   });
 
+  // #45 — dependencies.stellar_rpc reports reachability distinctly from `status`
+  it('reports dependencies.stellar_rpc as "ok" when the RPC check succeeds', async () => {
+    mockCheckRpc.mockResolvedValue(undefined);
+    const result = await runHealthCheck({ ...BASE_OPTIONS, deepCheck: true });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.payload.dependencies).toEqual({ stellar_rpc: 'ok' });
+    }
+  });
+
+  it('does not include dependencies when deepCheck is not requested', async () => {
+    const result = await runHealthCheck(BASE_OPTIONS);
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.payload.dependencies).toBeUndefined();
+    }
+  });
+
   it('returns ok:false when deepCheck is true and RPC check fails', async () => {
     mockCheckRpc.mockRejectedValue(new Error('connection refused'));
 
@@ -77,6 +97,8 @@ describe('runHealthCheck', () => {
       expect(result.payload.uptime).toBe(42);
       expect(result.payload.version).toBe('1.2.3');
       expect(result.payload.error).toContain('connection refused');
+      // #45 — an unreachable RPC is reported via dependencies.stellar_rpc
+      expect(result.payload.dependencies).toEqual({ stellar_rpc: 'unreachable' });
     }
   });
 

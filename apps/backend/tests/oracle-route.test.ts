@@ -57,10 +57,14 @@ describe('POST /api/oracle/submit-result — match not found', () => {
       .send(VALID_BODY);
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toBe('Match not found');
-    expect(res.body.details).toContain('lichess-game-abc123');
+    // #50 — standard { error: { code, message } } envelope; the previous
+    // separate `details` field is folded into error.message, and `hint`
+    // (when present) lives at error.hint, not at the top level.
+    expect(res.body.error.code).toBe('NOT_FOUND');
+    expect(res.body.error.message).toContain('Match not found');
+    expect(res.body.error.message).toContain('lichess-game-abc123');
     // Must NOT carry the persistence-loss hint
-    expect(res.body.hint).toBeUndefined();
+    expect(res.body.error.hint).toBeUndefined();
   });
 
   it('returns 404 with a persistence-loss hint when the store is empty', async () => {
@@ -71,10 +75,11 @@ describe('POST /api/oracle/submit-result — match not found', () => {
       .send(VALID_BODY);
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toBe('Match not found');
-    expect(res.body.hint).toBe('persistence_loss_suspected');
-    expect(res.body.details).toMatch(/server may have restarted/i);
-    expect(res.body.details).toMatch(/QUEUE_STORE/i);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+    expect(res.body.error.message).toContain('Match not found');
+    expect(res.body.error.hint).toBe('persistence_loss_suspected');
+    expect(res.body.error.message).toMatch(/server may have restarted/i);
+    expect(res.body.error.message).toMatch(/QUEUE_STORE/i);
   });
 
   it('logs oracle_match_not_found_empty_store at error level when store is empty', async () => {

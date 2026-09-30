@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { matchStore } from '../store/index.js';
 import { authenticate } from '../middleware/auth.js';
 import { validateCreateMatchInput, createMatchForPlayer } from '../services/match-service.js';
+import { ErrorCode, errorEnvelope, statusToErrorCode } from '../errors/errorResponse.js';
 
 const router = Router();
 const store = matchStore;
@@ -12,13 +13,13 @@ router.post('/', async (req, res) => {
   const payload = req.body;
 
   if (!payload || typeof payload !== 'object') {
-    return res.status(400).json({ error: 'Request body must be JSON' });
+    return res.status(400).json(errorEnvelope(ErrorCode.VALIDATION_ERROR, 'Request body must be JSON'));
   }
 
   // Validate input fields before calling the service
   const validationError = validateCreateMatchInput(req.address, payload);
   if (validationError) {
-    return res.status(400).json({ error: validationError });
+    return res.status(400).json(errorEnvelope(ErrorCode.VALIDATION_ERROR, validationError));
   }
 
   const result = await createMatchForPlayer(store, req.address, {
@@ -31,9 +32,8 @@ router.post('/', async (req, res) => {
   });
 
   if (!result.ok) {
-    const body: Record<string, string> = { error: result.error };
-    if (result.details) body.details = result.details;
-    return res.status(result.status).json(body);
+    const message = result.details ? `${result.error}: ${result.details}` : result.error;
+    return res.status(result.status).json(errorEnvelope(statusToErrorCode(result.status), message));
   }
 
   return res.status(201).json(result.match);

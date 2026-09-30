@@ -80,3 +80,40 @@ export async function checkStellarRpc(): Promise<void> {
     throw new Error("Stellar RPC unavailable");
   }
 }
+
+/**
+ * Fetch the current ledger sequence number from the Soroban RPC (#51).
+ *
+ * Used to detect a match that has been Active longer than the escrow
+ * contract's on-chain `timeout_ledgers` window, at which point no further
+ * payout is possible and polling should stop.
+ */
+export async function getCurrentLedger(): Promise<number> {
+  const rpcUrl = process.env.STELLAR_RPC_URL;
+  if (!rpcUrl) {
+    throw new Error("STELLAR_RPC_URL not configured");
+  }
+
+  const response = await stellarRpcClient.post(
+    rpcUrl,
+    {
+      method: "getLatestLedger",
+      params: [],
+      id: 1,
+      jsonrpc: "2.0",
+    },
+    {
+      timeout: 5000,
+      headers: {
+        "Content-Type": "application/json",
+      },
+    },
+  );
+
+  const sequence = response.data?.result?.sequence;
+  if (response.status !== 200 || !response.data || response.data.error || typeof sequence !== "number") {
+    throw new Error("Failed to fetch current ledger from Stellar RPC");
+  }
+
+  return sequence;
+}

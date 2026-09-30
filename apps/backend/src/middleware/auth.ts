@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt, { JsonWebTokenError, TokenExpiredError } from 'jsonwebtoken';
+import { ErrorCode, errorEnvelope } from '../errors/errorResponse.js';
 
 /**
  * JWT_SECRET is used to sign and verify authentication tokens.
@@ -43,24 +44,24 @@ declare module 'express-serve-static-core' {
 export function authenticate(req: Request, res: Response, next: NextFunction) {
   const auth = req.header('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'unauthorized', message: 'Missing or invalid Authorization header' });
+    return res.status(401).json(errorEnvelope(ErrorCode.UNAUTHORIZED, 'Missing or invalid Authorization header'));
   }
 
   const token = auth.slice(7);
   try {
     const payload = jwt.verify(token, SECRET) as { address?: string };
     if (!payload || typeof payload.address !== 'string') {
-      return res.status(401).json({ error: 'unauthorized', message: 'Invalid token payload' });
+      return res.status(401).json(errorEnvelope(ErrorCode.UNAUTHORIZED, 'Invalid token payload'));
     }
     req.address = payload.address;
     next();
   } catch (error) {
     if (error instanceof TokenExpiredError) {
-      return res.status(401).json({ error: 'unauthorized', message: 'Token has expired' });
+      return res.status(401).json(errorEnvelope(ErrorCode.UNAUTHORIZED, 'Token has expired'));
     }
     if (error instanceof JsonWebTokenError) {
-      return res.status(401).json({ error: 'unauthorized', message: 'Invalid token' });
+      return res.status(401).json(errorEnvelope(ErrorCode.UNAUTHORIZED, 'Invalid token'));
     }
-    return res.status(401).json({ error: 'unauthorized', message: 'Authentication failed' });
+    return res.status(401).json(errorEnvelope(ErrorCode.UNAUTHORIZED, 'Authentication failed'));
   }
 }

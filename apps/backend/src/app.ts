@@ -4,6 +4,7 @@ import healthRouter from './routes/health.js';
 import matchRouter from './routes/matches.js';
 import validateGameRouter from './routes/validate-game.js';
 import oracleRouter from './routes/oracle.js';
+import { ErrorCode, errorEnvelope } from './errors/errorResponse.js';
 
 /**
  * Parse the ALLOWED_ORIGINS environment variable into an array of origin strings.
@@ -45,5 +46,13 @@ app.use('/health', healthRouter);
 app.use('/api/matches', matchRouter);
 app.use('/api/validate-game', validateGameRouter);
 app.use('/api/oracle', oracleRouter);
+
+// Fallback for any error a route handler doesn't catch itself, so an
+// unhandled exception still produces the standard { error: { code, message } }
+// envelope (#50) instead of Express's default HTML error page.
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  const message = err instanceof Error ? err.message : 'Unknown error';
+  res.status(500).json(errorEnvelope(ErrorCode.INTERNAL_ERROR, message));
+});
 
 export default app;

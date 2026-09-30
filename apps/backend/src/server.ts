@@ -6,6 +6,7 @@ import { initializeQueue, closeQueue, startRetryWorker, listDlqEntries, writeToD
 import { initializeMatchStore } from './store/index.js';
 import { PollingJobStore, PollingWorker } from './services/polling.js';
 import ChessPlatformPoller from './services/game-poller.js';
+import { getCurrentLedger } from './services/stellar.js';
 import { loadRetryConfig, submitWithIdempotence, type OracleSubmission } from './services/oracle-submit.js';
 import logger from './logger.js';
 
@@ -104,6 +105,10 @@ async function main() {
       pollingIntervalMs: Number(process.env.POLLING_INTERVAL_MS ?? 30_000),
       maxPollingAttempts: Number(process.env.MAX_POLLING_ATTEMPTS ?? 1440),
       backoffMultiplier: Number(process.env.POLLING_BACKOFF_MULTIPLIER ?? 1.0),
+      // #51 — lets the worker detect a match that has exceeded the escrow
+      // contract's on-chain timeout_ledgers window and move it to DLQ
+      // instead of polling a match no payout can still reach.
+      getCurrentLedger,
       onGameCompleted: async (job, result) => {
         logger.info(
           {

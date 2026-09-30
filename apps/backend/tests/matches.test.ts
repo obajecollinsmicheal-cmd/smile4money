@@ -105,7 +105,9 @@ describe('POST /api/matches', () => {
       });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('player1 and player2 must be different addresses');
+    // #50 — standard { error: { code, message } } envelope
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('player1 and player2 must be different addresses');
   });
 
   it('returns 400 when stakeAmount is missing', async () => {
@@ -133,7 +135,8 @@ describe('POST /api/matches', () => {
       .set('Authorization', `Bearer ${makeToken()}`)
       .send({ player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', stakeAmount: 1.5, token: 'XLM', gameId: 'lichess-game-abc123', platform: 'lichess' });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('stakeAmount must be a whole number of stroops');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('stakeAmount must be a whole number of stroops');
   });
 
   it('returns 400 when gameId is missing', async () => {
@@ -184,6 +187,8 @@ describe('POST /api/matches', () => {
       .send({ player2: 'GPLAYER3CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC', stakeAmount: 100, token: 'XLM', gameId: 'lichess-game-abc123', platform: 'lichess' });
 
     expect(response.status).toBe(409);
+    // #50 — standard { error: { code, message } } envelope
+    expect(response.body.error.code).toBe('CONFLICT');
   });
 
   it('returns 400 with Invalid game when lichess game does not exist', async () => {
@@ -194,8 +199,10 @@ describe('POST /api/matches', () => {
       .send({ player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', stakeAmount: 100, token: 'XLM', gameId: 'nonexistent-game', platform: 'lichess' });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Invalid game');
-    expect(response.body.details).toBeDefined();
+    // #50 — the previous separate `details` field is now folded into
+    // error.message; the standard envelope has no top-level `details`.
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toContain('Invalid game');
   });
 
   it('returns 400 with Invalid game when chessdotcom is missing username', async () => {
@@ -205,8 +212,9 @@ describe('POST /api/matches', () => {
       .send({ player2: 'GPLAYER2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB', stakeAmount: 100, token: 'XLM', gameId: 'chess-game-1', platform: 'chessdotcom' });
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('Invalid game');
-    expect(response.body.details).toContain('username is required');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toContain('Invalid game');
+    expect(response.body.error.message).toContain('username is required');
   });
 
   it('returns 201 for chessdotcom when username provided and game exists', async () => {
@@ -235,8 +243,9 @@ describe('POST /api/matches', () => {
         .send({});
 
       expect(response.status).toBe(401);
-      expect(response.body.error).toBe('unauthorized');
-      expect(response.body.message).toBeDefined();
+      // #50 — standard { error: { code, message } } envelope
+      expect(response.body.error.code).toBe('UNAUTHORIZED');
+      expect(response.body.error.message).toBeDefined();
     });
 
     it('returns 401 with error and message when Authorization header is malformed', async () => {
@@ -246,8 +255,8 @@ describe('POST /api/matches', () => {
         .send({});
 
       expect(response.status).toBe(401);
-      expect(response.body.error).toBe('unauthorized');
-      expect(response.body.message).toBeDefined();
+      expect(response.body.error.code).toBe('UNAUTHORIZED');
+      expect(response.body.error.message).toBeDefined();
     });
 
     it('returns 401 with error and message when JWT has expired', async () => {
@@ -263,8 +272,8 @@ describe('POST /api/matches', () => {
         .send({});
 
       expect(response.status).toBe(401);
-      expect(response.body.error).toBe('unauthorized');
-      expect(response.body.message).toContain('expired');
+      expect(response.body.error.code).toBe('UNAUTHORIZED');
+      expect(response.body.error.message).toContain('expired');
     });
 
     it('returns 401 with error and message when JWT token lacks address claim', async () => {
@@ -276,8 +285,8 @@ describe('POST /api/matches', () => {
         .send({});
 
       expect(response.status).toBe(401);
-      expect(response.body.error).toBe('unauthorized');
-      expect(response.body.message).toContain('Invalid');
+      expect(response.body.error.code).toBe('UNAUTHORIZED');
+      expect(response.body.error.message).toContain('Invalid');
     });
 
     it('successfully authenticates with valid JWT token', async () => {

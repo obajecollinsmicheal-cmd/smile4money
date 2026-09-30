@@ -222,6 +222,30 @@ git ls-remote https://github.com/<owner>/<repo>.git refs/tags/<tag>
 
 ---
 
+## Dependency Pinning Policy
+
+Every entry in `apps/backend/package.json`'s `dependencies` (not `devDependencies`) **must** be an exact version string — no `^` or `~` ranges. A caret/tilde range lets `npm install` pull in an unreviewed minor or patch upgrade, which can introduce a breaking change or a newly-disclosed vulnerability without anyone looking at it first.
+
+```json
+// ✅ Correct — exact version
+"cors": "2.8.6"
+
+// ❌ Incorrect — caret range allows automatic minor/patch upgrades
+"cors": "^2.8.6"
+```
+
+`devDependencies` (build tooling, test frameworks, type stubs) are not covered by this policy — those don't ship in the deployed backend, so a caret range there is a normal, low-risk convenience.
+
+CI enforces this: the `backend` job in `.github/workflows/ci.yml` fails the build if any `dependencies` entry starts with `^` or `~`.
+
+When adding or bumping a production dependency:
+
+1. Add/update it in `package.json` with the exact version you tested against.
+2. Run `npm install` in `apps/backend` to regenerate `package-lock.json`.
+3. Commit both files together.
+
+---
+
 ## Branch Protection Rules
 
 The `master` branch is protected. The following rules are enforced for all pull requests:

@@ -396,6 +396,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify production dependencies are pinned to exact versions
+        run: |
+          node -e "
+            const pkg = require('./package.json');
+            const loose = Object.entries(pkg.dependencies || {}).filter(([, range]) => /^[\^~]/.test(range));
+            if (loose.length > 0) {
+              console.error('Production dependencies must be pinned to exact versions (no ^ or ~ ranges):');
+              for (const [name, range] of loose) console.error('  ' + name + ': ' + range);
+              process.exit(1);
+            }
+            console.log('All production dependencies are pinned to exact versions.');
+          "
+
       - name: TypeScript compilation check
         run: npm run build
 

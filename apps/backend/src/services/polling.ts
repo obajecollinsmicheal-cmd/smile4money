@@ -26,6 +26,20 @@ export interface PollJob {
   pollingAttempt: number;
   createdAt: number;
   lastPolledAt: number | null;
+  /**
+   * Ledger height when the match went Active on-chain. Together with
+   * `timeoutLedgers`, this bounds how long the job may keep polling before
+   * the on-chain `timeout_ledgers` window makes a payout impossible (#51).
+   * Undefined when the caller doesn't have (or doesn't want to enforce)
+   * this — the worker then never times out the job on ledger height alone.
+   */
+  createdAtLedger?: number;
+  /**
+   * This match's `timeout_ledgers` window (the escrow contract allows this
+   * to be configured per match at `create_match` time). Falls back to
+   * `PollingConfig.defaultTimeoutLedgers` when not set.
+   */
+  timeoutLedgers?: number;
 }
 
 export interface PollJobStatus {
@@ -45,6 +59,21 @@ export interface PollingConfig {
   maxPollingAttempts?: number;
   /** Backoff multiplier applied to the interval on each retry. Defaults to 1.0 (no backoff). */
   backoffMultiplier?: number;
+  /**
+   * Default `timeout_ledgers` window (#51), used for a job that doesn't
+   * carry its own `PollJob.timeoutLedgers`. Defaults to `TIMEOUT_LEDGERS`
+   * from the escrow contract (~7 days at 5s/ledger — see
+   * contracts/smile4money-common/src/constants.rs).
+   */
+  defaultTimeoutLedgers?: number;
+  /**
+   * Returns the current Soroban ledger sequence number. Injected (rather
+   * than imported directly) so tests can control it without a real RPC
+   * call — matches the same DI pattern as `GamePoller`. When omitted, the
+   * ledger-timeout check in `pollJob` is skipped entirely (a job only ever
+   * moves to DLQ via `maxPollingAttempts`, the pre-existing behavior).
+   */
+  getCurrentLedger?: () => Promise<number>;
 
   /**
    * Called when a game finishes and a result is available.
@@ -100,6 +129,8 @@ export class PollingJobStore {
     gameId: string,
     platform: 'lichess' | 'chessdotcom',
     username?: string,
+    createdAtLedger?: number,
+    timeoutLedgers?: number,
   ): PollJob {
     if (this.matchIdToJobId.has(matchId)) {
       throw new Error(`Polling job already exists for match ${matchId}`);
@@ -115,6 +146,8 @@ export class PollingJobStore {
       pollingAttempt: 0,
       createdAt: Date.now(),
       lastPolledAt: null,
+      createdAtLedger,
+      timeoutLedgers,
     };
 
     this.jobs.set(id, job);
@@ -206,10 +239,17 @@ export class PollingJobStore {
  *   // Later...
  *   cleanup();
  */
+/** Matches contracts/smile4money-common/src/constants.rs's TIMEOUT_LEDGERS (~7 days at 5s/ledger). */
+const DEFAULT_TIMEOUT_LEDGERS = 120_960;
+
+/** `getCurrentLedger` stays optional even once the rest of the config is defaulted. */
+type ResolvedPollingConfig = Required<Omit<PollingConfig, 'getCurrentLedger'>> &
+  Pick<PollingConfig, 'getCurrentLedger'>;
+
 export class PollingWorker {
   private store: PollingJobStore;
   private poller: GamePoller;
-  private config: Required<PollingConfig>;
+  private config: ResolvedPollingConfig;
   private timers: Map<string, NodeJS.Timeout> = new Map();
 
   constructor(
@@ -223,6 +263,8 @@ export class PollingWorker {
       pollingIntervalMs: config.pollingIntervalMs ?? 30_000,
       maxPollingAttempts: config.maxPollingAttempts ?? 1440, // ~12 hours at 30s intervals
       backoffMultiplier: config.backoffMultiplier ?? 1.0, // No backoff by default
+      defaultTimeoutLedgers: config.defaultTimeoutLedgers ?? DEFAULT_TIMEOUT_LEDGERS,
+      getCurrentLedger: config.getCurrentLedger,
       onGameCompleted: config.onGameCompleted,
       onMaxAttemptsExceeded: config.onMaxAttemptsExceeded,
     };
@@ -299,13 +341,91 @@ export class PollingWorker {
   }
 
   /**
+   * Checks whether `job` has exceeded its on-chain `timeout_ledgers` window
+   * and, if so, moves it to DLQ with reason `TIMED_OUT` (#51).
+   *
+   * Fails open: if the ledger-height fetch itself fails (RPC unreachable,
+   * misconfigured), this logs a warning and returns `false` so the job is
+   * still polled normally this cycle rather than blocking on an
+   * unavailable dependency.
+   *
+   * @returns true if the job was timed out and moved to DLQ (the caller
+   *   must not continue processing this job this cycle)
+   */
+  private async checkLedgerTimeout(job: PollJob): Promise<boolean> {
+    const createdAtLedger = job.createdAtLedger;
+    if (createdAtLedger === undefined || !this.config.getCurrentLedger) {
+      return false;
+    }
+
+    const timeoutLedgers = job.timeoutLedgers ?? this.config.defaultTimeoutLedgers;
+
+    let currentLedger: number;
+    try {
+      currentLedger = await this.config.getCurrentLedger();
+    } catch (err) {
+      logger.warn(
+        {
+          match_id: job.matchId,
+          game_id: job.gameId,
+          error: err instanceof Error ? err.message : String(err),
+        },
+        'polling_job_ledger_fetch_failed',
+      );
+      return false;
+    }
+
+    if (currentLedger < createdAtLedger + timeoutLedgers) {
+      return false;
+    }
+
+    logger.error(
+      {
+        match_id: job.matchId,
+        game_id: job.gameId,
+        created_at_ledger: createdAtLedger,
+        timeout_ledgers: timeoutLedgers,
+        current_ledger: currentLedger,
+        ledgers_elapsed: currentLedger - createdAtLedger,
+      },
+      'polling_job_timed_out_moving_to_dlq',
+    );
+
+    this.store.removeJob(job.id);
+
+    try {
+      await this.config.onMaxAttemptsExceeded(job, 'TIMED_OUT');
+    } catch (callbackErr) {
+      logger.error(
+        {
+          match_id: job.matchId,
+          game_id: job.gameId,
+          error: callbackErr instanceof Error ? callbackErr.message : String(callbackErr),
+        },
+        'polling_job_on_max_attempts_callback_failed',
+      );
+    }
+
+    return true;
+  }
+
+  /**
    * Poll a single job and handle the result.
    *
+   * - If the match has been Active longer than its on-chain timeout_ledgers
+   *   window: stop polling and move to DLQ with reason TIMED_OUT (#51) —
+   *   no further payout is possible past that point, so continuing to poll
+   *   would be wasted work.
    * - If game is in progress: increment attempt, re-schedule this specific job
    * - If game is completed: call handler and remove job
    * - If error: increment attempt, check max attempts
    */
   private async pollJob(job: PollJob): Promise<void> {
+    if (job.createdAtLedger !== undefined && this.config.getCurrentLedger) {
+      const timedOut = await this.checkLedgerTimeout(job);
+      if (timedOut) return;
+    }
+
     this.store.incrementAttempt(job.id);
 
     const status = await this.poller.poll(job);

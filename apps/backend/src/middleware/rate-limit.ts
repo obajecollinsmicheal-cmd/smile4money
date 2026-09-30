@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
+import { ErrorCode, errorEnvelope } from '../errors/errorResponse.js';
 
 /**
  * Simple in-memory rate limiter using token bucket algorithm.
@@ -170,10 +171,7 @@ export function createRateLimitMiddleware(
         res.setHeader('Retry-After', String(result.retryAfterSeconds));
       }
 
-      return res.status(statusCode).json({
-        error: 'rate_limit_exceeded',
-        message,
-      });
+      return res.status(statusCode).json(errorEnvelope(ErrorCode.RATE_LIMITED, message));
     }
 
     next();

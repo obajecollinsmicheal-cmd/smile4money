@@ -25,8 +25,8 @@
 // frontend can share them; re-exported here because the escrow contract is
 // where these deadlines are actually enforced.
 pub use smile4money_common::constants::{
-    DISPUTE_WINDOW_LEDGERS, LEDGERS_PER_DAY, LEDGERS_PER_WEEK, MAX_GAME_ID_LEN, MATCH_TTL_LEDGERS, SECONDS_PER_DAY,
-    SECONDS_PER_LEDGER, SECONDS_PER_WEEK, TIMEOUT_LEDGERS,
+    DEFAULT_TIMEOUT_LEDGERS, DISPUTE_WINDOW_LEDGERS, LEDGERS_PER_DAY, LEDGERS_PER_WEEK, MAX_GAME_ID_LEN,
+    MATCH_TTL_LEDGERS, SECONDS_PER_DAY, SECONDS_PER_LEDGER, SECONDS_PER_WEEK, TIMEOUT_LEDGERS,
 };
 
 /// Minimum stake amount in the smallest token unit (1 stroop).

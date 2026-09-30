@@ -129,12 +129,14 @@ impl EscrowContract {
     ///
     /// This is the time an active match can remain without an oracle result
     /// before either player may call [`claim_timeout`](EscrowContract::claim_timeout).
-    /// Defaults to `TIMEOUT_LEDGERS` (~7 days) if not configured at initialization.
+    /// Defaults to [`DEFAULT_TIMEOUT_LEDGERS`] (~7 days / `120_960` ledgers at the
+    /// Stellar 5 s/ledger average) if no explicit value was passed to
+    /// [`initialize`](EscrowContract::initialize).
     pub fn get_timeout_ledgers(env: &Env) -> u32 {
         env.storage()
             .instance()
             .get(&DataKey::TimeoutLedgers)
-            .unwrap_or(TIMEOUT_LEDGERS)
+            .unwrap_or(DEFAULT_TIMEOUT_LEDGERS)
     }
 
     fn get_match_count(env: &Env) -> u64 {
@@ -228,7 +230,7 @@ impl EscrowContract {
     /// The `dispute_window_ledgers` and `timeout_ledgers` parameters allow configurable
     /// timing for different deployments (testnet vs mainnet, casual vs high-stakes matches).
     /// If not provided, they default to `DISPUTE_WINDOW_LEDGERS` (~24 hours) and
-    /// `TIMEOUT_LEDGERS` (~7 days) respectively.
+    /// [`DEFAULT_TIMEOUT_LEDGERS`] (~7 days / `120_960` ledgers) respectively.
     ///
     /// # Arguments
     ///
@@ -239,7 +241,7 @@ impl EscrowContract {
     /// * `dispute_window_ledgers` — The duration of the dispute window in ledgers. If `None`,
     ///   defaults to `DISPUTE_WINDOW_LEDGERS`.
     /// * `timeout_ledgers` — The timeout duration for active matches in ledgers. If `None`,
-    ///   defaults to `TIMEOUT_LEDGERS`.
+    ///   defaults to [`DEFAULT_TIMEOUT_LEDGERS`] (~7 days / `120_960` ledgers).
     ///
     /// # Panics
     ///
@@ -287,8 +289,8 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::DisputeWindowLedgers, &dispute_window);
 
-        // Store the configured timeout, or use the default
-        let timeout = timeout_ledgers.unwrap_or(TIMEOUT_LEDGERS);
+        // Store the configured timeout, or fall back to the default (~7 days).
+        let timeout = timeout_ledgers.unwrap_or(DEFAULT_TIMEOUT_LEDGERS);
         env.storage()
             .instance()
             .set(&DataKey::TimeoutLedgers, &timeout);

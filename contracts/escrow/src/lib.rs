@@ -1187,7 +1187,12 @@ impl EscrowContract {
     }
 
     /// Check whether both players have deposited.
+    ///
+    /// Returns `Error::MatchNotFound` when `match_id` does not correspond to any
+    /// existing match, rather than panicking. This covers both a `match_id` that
+    /// was never created and one that exceeds the current match counter.
     pub fn is_funded(env: Env, match_id: u64) -> Result<bool, Error> {
+        Self::validate_match_id(&env, match_id)?;
         let m: Match = env
             .storage()
             .persistent()

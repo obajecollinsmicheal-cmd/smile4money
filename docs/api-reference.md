@@ -1513,3 +1513,58 @@ oracle.transfer_admin(&new_oracle_service_addr);
 // New admin can submit results immediately
 oracle.submit_result(&match_id, &game_id, &MatchResult::Draw);
 ```
+
+## Backend REST API
+
+The off-chain backend (`apps/backend`) exposes `POST /api/matches`, `POST /api/oracle/submit-result`, `POST /api/validate-game`, and `GET /health`. This section documents its error response contract; see `docs/oracle.md` for the off-chain oracle's design.
+
+### Error Response Schema
+
+Every error response from the backend API follows the same envelope:
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "gameId is required"
+  }
+}
+```
+
+- `error.code` — a stable, machine-readable string. API consumers should branch on this, not on `error.message` (which is meant for humans and may be reworded).
+- `error.message` — a human-readable description of what went wrong.
+
+Some error responses include additional fields inside `error` (e.g. `error.hint`) for extra machine-readable context, but `code` and `message` are always present.
+
+`/api/validate-game`'s failure responses are the one exception: because that endpoint's job is to report on a game's validity as a normal (non-exceptional) outcome, its `valid`/`platform`/`gameId`/`message` fields are also present at the top level alongside `error`, for backward compatibility with existing consumers of that specific endpoint.
+
+### Error Codes
+
+| Code | HTTP Status | Meaning |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 | The request body or its fields are missing, malformed, or fail a business rule. |
+| `UNAUTHORIZED` | 401 | The `Authorization` header is missing, malformed, or the JWT is invalid/expired. |
+| `NOT_FOUND` | 404 | The referenced resource (a match, a game on the upstream chess platform) does not exist. |
+| `CONFLICT` | 409 | The request conflicts with existing state (e.g. a duplicate `gameId`). |
+| `RATE_LIMITED` | 429 | The caller has exceeded the endpoint's rate limit. |
+| `INTERNAL_ERROR` | 500 | An unexpected server-side failure. |
+
+This mapping lives in `apps/backend/src/errors/errorResponse.ts` (`ErrorCode`, `errorEnvelope`, `statusToErrorCode`) — that module is the source of truth if this table and the code ever disagree.
+
+### Example
+
+```bash
+curl -s -X POST http://localhost:4000/api/matches \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "player2 is required"
+  }
+}
+```

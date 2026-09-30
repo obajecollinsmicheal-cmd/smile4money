@@ -58,7 +58,9 @@ describe('POST /api/validate-game', () => {
       .post('/api/validate-game')
       .send({ platform: 'lichess' });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('gameId is required');
+    // #50 — standard { error: { code, message } } envelope
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('gameId is required');
   });
 
   it('returns 400 when gameId is empty string', async () => {
@@ -66,7 +68,8 @@ describe('POST /api/validate-game', () => {
       .post('/api/validate-game')
       .send({ gameId: '', platform: 'lichess' });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('gameId is required');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('gameId is required');
   });
 
   it('returns 400 when gameId is too long', async () => {
@@ -75,7 +78,8 @@ describe('POST /api/validate-game', () => {
       .post('/api/validate-game')
       .send({ gameId: longId, platform: 'lichess' });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('gameId is too long');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('gameId is too long');
   });
 
   it('returns 400 when platform is missing', async () => {
@@ -83,7 +87,8 @@ describe('POST /api/validate-game', () => {
       .post('/api/validate-game')
       .send({ gameId: 'abc123' });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('platform must be lichess or chessdotcom');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('platform must be lichess or chessdotcom');
   });
 
   it('returns 400 when platform is invalid', async () => {
@@ -91,7 +96,8 @@ describe('POST /api/validate-game', () => {
       .post('/api/validate-game')
       .send({ gameId: 'abc123', platform: 'unknown' });
     expect(response.status).toBe(400);
-    expect(response.body.error).toBe('platform must be lichess or chessdotcom');
+    expect(response.body.error.code).toBe('VALIDATION_ERROR');
+    expect(response.body.error.message).toBe('platform must be lichess or chessdotcom');
   });
 
   describe('lichess validation', () => {
@@ -142,6 +148,10 @@ describe('POST /api/validate-game', () => {
       expect(response.body.platform).toBe('lichess');
       expect(response.body.gameId).toBe('missing');
       expect(response.body.message).toContain('not found');
+      // #50 — the standard error envelope is present alongside this
+      // endpoint's existing domain-specific fields.
+      expect(response.body.error.code).toBe('NOT_FOUND');
+      expect(response.body.error.message).toContain('not found');
     });
 
     it('returns 500 with valid=false on lichess API unexpected error', async () => {
@@ -154,6 +164,8 @@ describe('POST /api/validate-game', () => {
       expect(response.status).toBe(500);
       expect(response.body.valid).toBe(false);
       expect(response.body.message).toContain('Validation failed');
+      expect(response.body.error.code).toBe('INTERNAL_ERROR');
+      expect(response.body.error.message).toContain('Validation failed');
     });
   });
 
@@ -164,7 +176,8 @@ describe('POST /api/validate-game', () => {
         .send({ gameId: 'game42', platform: 'chessdotcom' });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toContain('username is required');
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+      expect(response.body.error.message).toContain('username is required');
     });
 
     it('returns 400 when username is empty string for chessdotcom', async () => {
@@ -173,7 +186,8 @@ describe('POST /api/validate-game', () => {
         .send({ gameId: 'game42', platform: 'chessdotcom', username: '' });
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toContain('username is required');
+      expect(response.body.error.code).toBe('VALIDATION_ERROR');
+      expect(response.body.error.message).toContain('username is required');
     });
 
     it('returns 200 with valid=true when chess.com game exists in player archives', async () => {
@@ -226,6 +240,8 @@ describe('POST /api/validate-game', () => {
       expect(response.body.platform).toBe('chessdotcom');
       expect(response.body.gameId).toBe('missing');
       expect(response.body.message).toContain('not found');
+      expect(response.body.error.code).toBe('NOT_FOUND');
+      expect(response.body.error.message).toContain('not found');
     });
 
     it('returns 500 with valid=false on chess.com API error', async () => {
@@ -238,6 +254,8 @@ describe('POST /api/validate-game', () => {
       expect(response.status).toBe(500);
       expect(response.body.valid).toBe(false);
       expect(response.body.message).toContain('Validation failed');
+      expect(response.body.error.code).toBe('INTERNAL_ERROR');
+      expect(response.body.error.message).toContain('Validation failed');
     });
   });
 
@@ -292,7 +310,8 @@ describe('POST /api/validate-game', () => {
 
       // The middleware sets a 429 status when rate limit is exceeded.
       // We verify the error message structure is correct.
-      const rateLimitError = { error: 'rate_limit_exceeded', message: expect.any(String) };
+      // #50 — the standard error envelope shape a real 429 response would carry.
+      const rateLimitError = { error: { code: 'RATE_LIMITED', message: expect.any(String) } };
       expect(rateLimitError).toEqual(rateLimitError);
     });
   });

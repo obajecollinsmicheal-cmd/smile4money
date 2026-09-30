@@ -363,6 +363,99 @@ describe('Game Polling System', () => {
       expect(noCallbackStore.getJobByMatchId(3)).toBeNull();
     });
 
+    // #51 — a match Active longer than its on-chain timeout_ledgers window
+    // is moved to DLQ with reason TIMED_OUT instead of being polled forever.
+    it('moves a timed-out match to DLQ with reason TIMED_OUT', async () => {
+      const timeoutPoller = new MockGamePoller();
+      timeoutPoller.setGameStatus('game-timeout', 'in_progress');
+      const pollSpy = vi.spyOn(timeoutPoller, 'poll');
+
+      const onMaxAttemptsExceeded = vi.fn().mockResolvedValue(undefined);
+      const timeoutStore = new PollingJobStore();
+      // Current ledger is far past createdAtLedger (1000) + timeoutLedgers (120_960).
+      const getCurrentLedger = vi.fn().mockResolvedValue(1000 + 120_960 + 1);
+
+      const timeoutWorker = new PollingWorker(timeoutStore, timeoutPoller, {
+        pollingIntervalMs: 100,
+        maxPollingAttempts: 5,
+        backoffMultiplier: 1.0,
+        getCurrentLedger,
+        onGameCompleted: vi.fn().mockResolvedValue(undefined),
+        onMaxAttemptsExceeded,
+      });
+
+      // createdAtLedger=1000, timeoutLedgers defaults (not passed) to the
+      // worker's defaultTimeoutLedgers (120_960, matching TIMEOUT_LEDGERS).
+      const job = timeoutStore.createJob(1, 'game-timeout', 'lichess', undefined, 1000);
+
+      const cleanup = timeoutWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      cleanup();
+
+      expect(getCurrentLedger).toHaveBeenCalled();
+      expect(onMaxAttemptsExceeded).toHaveBeenCalledWith(
+        expect.objectContaining({ matchId: 1, gameId: 'game-timeout' }),
+        'TIMED_OUT',
+      );
+      // Removed from the store, same as a max-attempts DLQ move.
+      expect(timeoutStore.getJobByMatchId(1)).toBeNull();
+      // The chess-platform API is never queried once the match has timed out.
+      expect(pollSpy).not.toHaveBeenCalled();
+    });
+
+    it('does not time out a match still within its timeout_ledgers window', async () => {
+      const inProgressPoller = new MockGamePoller();
+      inProgressPoller.setGameStatus('game-not-timed-out', 'in_progress');
+
+      const onMaxAttemptsExceeded = vi.fn().mockResolvedValue(undefined);
+      const withinWindowStore = new PollingJobStore();
+      const getCurrentLedger = vi.fn().mockResolvedValue(1000 + 100); // well within the window
+
+      const withinWindowWorker = new PollingWorker(withinWindowStore, inProgressPoller, {
+        pollingIntervalMs: 100,
+        maxPollingAttempts: 5,
+        backoffMultiplier: 1.0,
+        getCurrentLedger,
+        onGameCompleted: vi.fn().mockResolvedValue(undefined),
+        onMaxAttemptsExceeded,
+      });
+
+      withinWindowStore.createJob(1, 'game-not-timed-out', 'lichess', undefined, 1000, 120_960);
+
+      const cleanup = withinWindowWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      cleanup();
+
+      expect(onMaxAttemptsExceeded).not.toHaveBeenCalled();
+      expect(withinWindowStore.getJobByMatchId(1)).not.toBeNull();
+    });
+
+    it('skips the ledger-timeout check entirely when createdAtLedger is not set', async () => {
+      const getCurrentLedger = vi.fn();
+      const noLedgerStore = new PollingJobStore();
+      const noLedgerPoller = new MockGamePoller();
+      noLedgerPoller.setGameStatus('game-no-ledger', 'in_progress');
+
+      const noLedgerWorker = new PollingWorker(noLedgerStore, noLedgerPoller, {
+        pollingIntervalMs: 100,
+        maxPollingAttempts: 5,
+        backoffMultiplier: 1.0,
+        getCurrentLedger,
+        onGameCompleted: vi.fn().mockResolvedValue(undefined),
+        onMaxAttemptsExceeded: vi.fn().mockResolvedValue(undefined),
+      });
+
+      // No createdAtLedger passed — existing callers unaffected by #51.
+      noLedgerStore.createJob(1, 'game-no-ledger', 'lichess');
+
+      const cleanup = noLedgerWorker.start();
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      cleanup();
+
+      expect(getCurrentLedger).not.toHaveBeenCalled();
+      expect(noLedgerStore.getJobByMatchId(1)).not.toBeNull();
+    });
+
     it('calls onGameCompleted with job and result when game finishes', async () => {
       const onGameCompleted = vi.fn().mockResolvedValue(undefined);
       const completedStore = new PollingJobStore();

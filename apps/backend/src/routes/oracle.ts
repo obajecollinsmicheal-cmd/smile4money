@@ -37,12 +37,12 @@ router.post('/submit-result', async (req, res) => {
   const payload = req.body;
 
   if (!payload || typeof payload !== 'object') {
-    return res.status(400).json({ error: 'Request body must be JSON' });
+    return res.status(400).json(errorEnvelope(ErrorCode.VALIDATION_ERROR, 'Request body must be JSON'));
   }
 
   const inputError = validateSubmitResultInput(payload);
   if (inputError) {
-    return res.status(400).json({ error: inputError });
+    return res.status(400).json(errorEnvelope(ErrorCode.VALIDATION_ERROR, inputError));
   }
 
   try {
@@ -54,10 +54,9 @@ router.post('/submit-result', async (req, res) => {
     });
 
     if (!result.ok) {
-      const body: Record<string, unknown> = { error: result.error };
-      if (result.details) body.details = result.details;
-      if (result.hint) body.hint = result.hint;
-      return res.status(result.status).json(body);
+      const message = result.details ? `${result.error}: ${result.details}` : result.error;
+      const extra = result.hint ? { hint: result.hint } : undefined;
+      return res.status(result.status).json(errorEnvelope(statusToErrorCode(result.status), message, extra));
     }
 
     return res.status(200).json({

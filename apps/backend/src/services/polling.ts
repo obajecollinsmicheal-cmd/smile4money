@@ -308,8 +308,8 @@ export class PollingJobStore {
  *   const store = new PollingJobStore();
  *   const worker = new PollingWorker(store, gamePoller, config);
  *   const cleanup = worker.start();
- *   // Later...
- *   cleanup();
+ *   // Later, e.g. on SIGTERM...
+ *   await cleanup(); // waits for any in-flight poll to finish (#1719)
  */
 /** Matches contracts/smile4money-common/src/constants.rs's TIMEOUT_LEDGERS (~7 days at 5s/ledger). */
 const DEFAULT_TIMEOUT_LEDGERS = 120_960;
@@ -323,6 +323,21 @@ export class PollingWorker {
   private poller: GamePoller;
   private config: ResolvedPollingConfig;
   private timers: Map<string, NodeJS.Timeout> = new Map();
+  /**
+   * Poll operations (a full cycle or a single re-polled job) currently in
+   * flight, i.e. their network call to the chess-platform API has started
+   * but not yet resolved. `stop()` awaits these instead of abandoning them
+   * mid-request (#1719).
+   */
+  private inFlight: Set<Promise<void>> = new Set();
+  /**
+   * Set by `stop()`. Checked before arming any new timer or starting any new
+   * poll cycle, so work already in flight when shutdown begins is allowed to
+   * finish, but nothing new starts afterward — the polling-queue equivalent
+   * of `server.close()` refusing new connections while draining existing
+   * ones (#1719).
+   */
+  private stopped = false;
 
   constructor(
     store: PollingJobStore,
@@ -343,12 +358,26 @@ export class PollingWorker {
   }
 
   /**
+   * Registers `promise` as in-flight until it settles, so `stop()` can await
+   * it. Errors are not swallowed here — callers already attach their own
+   * `.catch`/try-catch for logging; this only tracks lifetime.
+   */
+  private track(promise: Promise<void>): Promise<void> {
+    const tracked = promise.finally(() => {
+      this.inFlight.delete(tracked);
+    });
+    this.inFlight.add(tracked);
+    return tracked;
+  }
+
+  /**
    * Start the polling worker.
    * Immediately polls all pending jobs, then sets up periodic polling.
    *
-   * @returns A cleanup function that stops the worker
+   * @returns A cleanup function that stops the worker and waits for any
+   *   in-flight poll to finish (#1719)
    */
-  start(): () => void {
+  start(): () => Promise<void> {
     logger.info(
       {
         interval_ms: this.config.pollingIntervalMs,
@@ -359,19 +388,29 @@ export class PollingWorker {
     );
 
     // Trigger first poll immediately
-    this.pollAllJobs();
+    this.track(this.pollAllJobs());
 
     return () => this.stop();
   }
 
   /**
-   * Stop the worker and clear all timers.
+   * Stop the worker: clear every pending timer (nothing that hasn't started
+   * yet will start), then wait for any poll cycle or per-job re-poll that
+   * was already running to finish before resolving (#1719). This is the
+   * "drain" half of graceful shutdown for the polling queue — in-flight
+   * chess-platform API calls and their DB writes are allowed to complete
+   * rather than being abandoned mid-request.
    */
-  stop(): void {
+  async stop(): Promise<void> {
+    this.stopped = true;
+
     for (const timer of this.timers.values()) {
       clearTimeout(timer);
     }
     this.timers.clear();
+
+    await Promise.allSettled([...this.inFlight]);
+
     logger.info({}, 'polling_worker_stopped');
   }
 
@@ -382,8 +421,10 @@ export class PollingWorker {
     const jobs = this.store.listPendingJobs();
 
     if (jobs.length === 0) {
-      // Re-schedule the next polling cycle
-      this.scheduleNextPoll();
+      // Re-schedule the next polling cycle, unless shutdown has started
+      // (#1719) — a cycle that finds nothing to do must not arm a timer
+      // that would fire after stop() has already returned.
+      if (!this.stopped) this.scheduleNextPoll();
       return;
     }
 
@@ -408,8 +449,8 @@ export class PollingWorker {
       }
     }
 
-    // Re-schedule the next polling cycle
-    this.scheduleNextPoll();
+    // Re-schedule the next polling cycle, unless shutdown has started (#1719).
+    if (!this.stopped) this.scheduleNextPoll();
   }
 
   /**
@@ -520,18 +561,24 @@ export class PollingWorker {
         'polling_job_game_in_progress_re_enqueuing',
       );
 
-      // Schedule next poll for this specific job
+      // Schedule next poll for this specific job, unless shutdown has
+      // started (#1719) — this timer callback fires later, asynchronously,
+      // so it must re-check `this.stopped` itself rather than trust the
+      // state at the moment it was armed.
       const timer = setTimeout(() => {
-        this.pollJob(job).catch((err) => {
-          logger.error(
-            {
-              match_id: job.matchId,
-              game_id: job.gameId,
-              error: err instanceof Error ? err.message : String(err),
-            },
-            'polling_job_requeue_failed',
-          );
-        });
+        if (this.stopped) return;
+        this.track(
+          this.pollJob(job).catch((err) => {
+            logger.error(
+              {
+                match_id: job.matchId,
+                game_id: job.gameId,
+                error: err instanceof Error ? err.message : String(err),
+              },
+              'polling_job_requeue_failed',
+            );
+          }),
+        );
       }, nextDelay);
 
       this.timers.set(job.id, timer);
@@ -618,14 +665,17 @@ export class PollingWorker {
    */
   private scheduleNextPoll(): void {
     const timer = setTimeout(() => {
-      this.pollAllJobs().catch((err) => {
-        logger.error(
-          {
-            error: err instanceof Error ? err.message : String(err),
-          },
-          'polling_worker_cycle_error',
-        );
-      });
+      if (this.stopped) return;
+      this.track(
+        this.pollAllJobs().catch((err) => {
+          logger.error(
+            {
+              error: err instanceof Error ? err.message : String(err),
+            },
+            'polling_worker_cycle_error',
+          );
+        }),
+      );
     }, this.config.pollingIntervalMs);
 
     // Use a fixed key so we don't accumulate timers

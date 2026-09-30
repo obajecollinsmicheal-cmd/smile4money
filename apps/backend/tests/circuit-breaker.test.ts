@@ -4,6 +4,7 @@ import {
   CircuitState,
   getCircuitBreaker,
   resetCircuitBreaker,
+  type PersistedCircuitBreakerState,
 } from '../src/services/circuit-breaker.js';
 
 describe('CircuitBreaker', () => {
@@ -368,6 +369,165 @@ describe('CircuitBreaker', () => {
         breaker.recordSuccess();
         expect(breaker.getState()).toBe(CircuitState.CLOSED);
       }
+    });
+  });
+
+  // #1716 — state persistence and restoration across a simulated restart.
+  describe('State persistence (#1716)', () => {
+    it('getSnapshot reflects the current state exactly', () => {
+      breaker.recordFailure();
+      breaker.recordFailure();
+
+      const snapshot = breaker.getSnapshot();
+      expect(snapshot).toEqual({
+        state: CircuitState.CLOSED,
+        failureCount: 2,
+        successCount: 0,
+        lastFailureTime: expect.any(Number),
+        openedAt: null,
+        attemptCount: 0,
+      });
+    });
+
+    it('calls onPersist with a snapshot after every mutating call', () => {
+      const onPersist = vi.fn();
+      const persistingBreaker = new CircuitBreaker({
+        failureThreshold: 3,
+        cooldownMs: 1000,
+        backoffMultiplier: 2,
+        maxCooldownMs: 10000,
+        successThreshold: 2,
+        onPersist,
+      });
+
+      persistingBreaker.recordFailure();
+      expect(onPersist).toHaveBeenCalledTimes(1);
+      expect(onPersist).toHaveBeenLastCalledWith(
+        expect.objectContaining({ failureCount: 1, state: CircuitState.CLOSED }),
+      );
+
+      persistingBreaker.recordSuccess();
+      expect(onPersist).toHaveBeenCalledTimes(2);
+
+      persistingBreaker.reset();
+      expect(onPersist).toHaveBeenCalledTimes(3);
+    });
+
+    it('a synchronously-throwing onPersist does not break the caller', () => {
+      const persistingBreaker = new CircuitBreaker({
+        failureThreshold: 3,
+        cooldownMs: 1000,
+        backoffMultiplier: 2,
+        maxCooldownMs: 10000,
+        successThreshold: 2,
+        onPersist: () => {
+          throw new Error('disk full');
+        },
+      });
+
+      expect(() => persistingBreaker.recordFailure()).not.toThrow();
+      expect(persistingBreaker.getFailureCount()).toBe(1);
+    });
+
+    it('restoreState resumes CLOSED with the persisted failure count', () => {
+      const persisted: PersistedCircuitBreakerState = {
+        state: CircuitState.CLOSED,
+        failureCount: 2,
+        successCount: 0,
+        lastFailureTime: Date.now(),
+        openedAt: null,
+        attemptCount: 0,
+      };
+
+      breaker.restoreState(persisted);
+
+      expect(breaker.getState()).toBe(CircuitState.CLOSED);
+      expect(breaker.getFailureCount()).toBe(2);
+    });
+
+    it('restoreState resumes OPEN and keeps the remaining cooldown when not stale', () => {
+      const now = Date.now();
+      const persisted: PersistedCircuitBreakerState = {
+        state: CircuitState.OPEN,
+        failureCount: 3,
+        successCount: 0,
+        lastFailureTime: now,
+        openedAt: now,
+        attemptCount: 0,
+      };
+
+      // cooldownMs is 1000 for this breaker; restore as if opened 400ms ago.
+      vi.advanceTimersByTime(400);
+      breaker.restoreState(persisted, now + 400);
+
+      expect(breaker.getState()).toBe(CircuitState.OPEN);
+      expect(breaker.allowRequest()).toBe(false);
+
+      // Advancing past the remaining cooldown still transitions to HALF_OPEN
+      // exactly as it would have if the process had never restarted.
+      vi.advanceTimersByTime(700);
+      expect(breaker.allowRequest()).toBe(true);
+      expect(breaker.getState()).toBe(CircuitState.HALF_OPEN);
+    });
+
+    it('restoreState discards a stale OPEN state and resumes CLOSED', () => {
+      const now = Date.now();
+      const persisted: PersistedCircuitBreakerState = {
+        state: CircuitState.OPEN,
+        failureCount: 3,
+        successCount: 0,
+        lastFailureTime: now,
+        openedAt: now,
+        attemptCount: 0,
+      };
+
+      // cooldownMs is 1000; "restart" 5000ms after it opened -- well past
+      // the half-open timeout, simulating a long process downtime while the
+      // upstream had already had time to recover.
+      breaker.restoreState(persisted, now + 5000);
+
+      expect(breaker.getState()).toBe(CircuitState.CLOSED);
+      expect(breaker.getFailureCount()).toBe(0);
+      expect(breaker.allowRequest()).toBe(true);
+    });
+
+    it('restoreState discards a stale HALF_OPEN state and resumes CLOSED', () => {
+      const now = Date.now();
+      const persisted: PersistedCircuitBreakerState = {
+        state: CircuitState.HALF_OPEN,
+        failureCount: 0,
+        successCount: 1,
+        lastFailureTime: now - 500,
+        openedAt: now - 500,
+        attemptCount: 1,
+      };
+
+      breaker.restoreState(persisted, now + 10_000);
+
+      expect(breaker.getState()).toBe(CircuitState.CLOSED);
+    });
+
+    it('restoreState persists the (possibly reset) state via onPersist', () => {
+      const onPersist = vi.fn();
+      const persistingBreaker = new CircuitBreaker({
+        failureThreshold: 3,
+        cooldownMs: 1000,
+        backoffMultiplier: 2,
+        maxCooldownMs: 10000,
+        successThreshold: 2,
+        onPersist,
+      });
+
+      persistingBreaker.restoreState({
+        state: CircuitState.CLOSED,
+        failureCount: 1,
+        successCount: 0,
+        lastFailureTime: Date.now(),
+        openedAt: null,
+        attemptCount: 0,
+      });
+
+      expect(onPersist).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -51,8 +51,13 @@ export type SubmitResultOutcome = SubmitResultSuccess | SubmitResultFailure;
 export function validateSubmitResultInput(input: Partial<SubmitResultInput>): string | null {
   const { matchId, gameId, platform, username } = input;
 
-  if (typeof matchId !== 'number' || !Number.isFinite(matchId)) {
-    return 'matchId must be a number';
+  // #1717 — matchId is forwarded to the Stellar transaction builder, which
+  // expects a positive integer (a contract-side u64 match id). A non-numeric
+  // value, a float, zero, or a negative number must be rejected here, at the
+  // route layer, rather than surfacing as a runtime error deep in the
+  // transaction-building call stack.
+  if (typeof matchId !== 'number' || !Number.isInteger(matchId) || matchId <= 0) {
+    return 'matchId must be a positive integer';
   }
   if (!gameId || typeof gameId !== 'string' || gameId.length === 0) {
     return 'gameId is required';

@@ -140,3 +140,55 @@ describe('POST /api/oracle/submit-result — match not found', () => {
     expect(entry.store_count).toBe(1);
   });
 });
+
+// #1717 — matchId must be validated as a positive integer before any
+// downstream processing (store lookup, chess-platform API calls, Stellar
+// transaction building).
+describe('POST /api/oracle/submit-result — matchId validation', () => {
+  it('returns 200 for a valid positive-integer matchId', async () => {
+    await matchStore.createMatch({
+      player1: 'GPLAYER1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      player2: 'GPLAYER2AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+      player1Username: 'alice',
+      player2Username: 'bob',
+      stakeAmount: 100,
+      token: 'XLM',
+      gameId: VALID_BODY.gameId,
+      platform: 'lichess',
+    });
+
+    const res = await request(createApp())
+      .post('/api/oracle/submit-result')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send(VALID_BODY);
+
+    expect(res.status).not.toBe(400);
+  });
+
+  it.each([
+    ['non-numeric string', 'not-a-number'],
+    ['a float', 1.5],
+    ['zero', 0],
+    ['negative', -1],
+  ])('returns 400 when matchId is %s', async (_label, matchId) => {
+    const res = await request(createApp())
+      .post('/api/oracle/submit-result')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ ...VALID_BODY, matchId });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_ERROR');
+    expect(res.body.error.message).toBe('matchId must be a positive integer');
+  });
+
+  it('rejects an invalid matchId before touching the match store', async () => {
+    const countSpy = vi.spyOn(matchStore, 'findByGameId');
+
+    await request(createApp())
+      .post('/api/oracle/submit-result')
+      .set('Authorization', `Bearer ${makeToken()}`)
+      .send({ ...VALID_BODY, matchId: -5 });
+
+    expect(countSpy).not.toHaveBeenCalled();
+  });
+});

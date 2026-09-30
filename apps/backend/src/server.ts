@@ -4,10 +4,12 @@ dotenv.config();
 import { app } from './app.js';
 import { initializeQueue, closeQueue, startRetryWorker, startDlqEvictionTask, listDlqEntries, writeToDlq, type DlqEntry } from './queue.js';
 import { initializeMatchStore } from './store/index.js';
+import { initializeCircuitBreaker, closeCircuitBreakerStore } from './services/circuit-breaker.js';
 import { PollingJobStore, PollingWorker, parsePollingIntervalMs } from './services/polling.js';
 import ChessPlatformPoller from './services/game-poller.js';
 import { getCurrentLedger } from './services/stellar.js';
 import { loadRetryConfig, submitWithIdempotence, type OracleSubmission } from './services/oracle-submit.js';
+import { createShutdownHandler } from './shutdown.js';
 import logger from './logger.js';
 
 const port = Number(process.env.PORT || 4000);
@@ -88,6 +90,12 @@ async function main() {
     await initializeMatchStore();
     logger.info('Match store initialized');
 
+    // Initialize the circuit breaker with SQLite-backed persistence (#1716),
+    // restoring its prior state (or resetting to CLOSED if it went stale
+    // while this process was down) before the retry worker starts using it.
+    await initializeCircuitBreaker();
+    logger.info('Circuit breaker initialized');
+
     // Load any pending jobs from the queue on startup
     const pendingEntries = await listDlqEntries();
     logger.info(
@@ -153,21 +161,22 @@ async function main() {
       );
     });
 
-    // Graceful shutdown
-    const shutdown = async () => {
-      logger.info('Shutting down gracefully...');
-      stopPollingWorker();
-      stopRetryWorker();
-      stopDlqEviction();
-      await closeQueue();
-      server.close(() => {
-        logger.info('Server closed');
-        process.exit(0);
-      });
-    };
+    // Graceful shutdown (#1719) — see shutdown.ts for the full sequencing
+    // rationale (stop accepting new connections, drain in-flight work, close
+    // stores, force-exit on timeout).
+    const shutdown = createShutdownHandler({
+      server,
+      stopPollingWorker,
+      stopRetryWorker,
+      stopDlqEviction,
+      closeQueue,
+      closeCircuitBreakerStore,
+      logger,
+      shutdownTimeoutMs: Number(process.env.SHUTDOWN_TIMEOUT_MS ?? 30_000),
+    });
 
-    process.on('SIGTERM', shutdown);
-    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', () => void shutdown('SIGTERM'));
+    process.on('SIGINT', () => void shutdown('SIGINT'));
   } catch (error) {
     logger.error({ error }, 'Failed to start server');
     process.exit(1);

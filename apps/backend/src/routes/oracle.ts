@@ -3,6 +3,7 @@ import { matchStore } from '../store/index.js';
 import { authenticate } from '../middleware/auth.js';
 import { validateSubmitResultInput, verifyGameResult } from '../services/oracle-service.js';
 import { errorToHttpStatus } from '../errors/errorToHttpStatus.js';
+import { errorEnvelope, ErrorCode, statusToErrorCode } from '../errors/errorResponse.js';
 
 const router = Router();
 const store = matchStore;

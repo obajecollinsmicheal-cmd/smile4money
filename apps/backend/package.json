@@ -12,7 +12,7 @@
     "format:check": "prettier --check \"src/**/*.{ts}\" \"tests/**/*.{ts}\""
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "16.0.1",
+    "@stellar/stellar-sdk": "17.1.0",
     "axios": "1.18.1",
     "bottleneck": "2.19.5",
     "cors": "2.8.6",

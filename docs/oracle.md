@@ -162,6 +162,51 @@ const worker = new PollingWorker(store, poller, {
 });
 ```
 
+## Queue Store Persistence
+
+The oracle dead-letter queue (DLQ) is backed by a pluggable `PersistentQueueStore`
+(`apps/backend/src/store/`), selected at startup via `QUEUE_STORE`:
+
+| `QUEUE_STORE` | Resolves to | Notes |
+|---|---|---|
+| unset / `auto` (default) | SQLite | Durable, file-based, no extra service required |
+| `sqlite` | SQLite | Same as `auto` |
+| `mongodb` | SQLite | The `mongoose` dependency is not installed in this deployment; requests fall back to SQLite with a startup warning |
+| `memory` | In-memory | **Development only** — entries are lost on every process restart |
+
+SQLite is the default precisely because DLQ entries represent submissions that already failed
+once; losing them silently on a restart (the in-memory store's behavior) means a real payout
+failure can go unnoticed. The SQLite store writes to `apps/backend/data/oracle-queue.db` (created
+automatically on first use) and survives process restarts and redeploys as long as that file
+persists.
+
+**In production, never run with `QUEUE_STORE=memory`.** If `NODE_ENV=production` and `memory` is
+requested anyway, `initializeQueue()` auto-corrects to SQLite and logs a warning explaining the
+override — this is a deliberate choice over silently allowing data loss in production, since an
+operator can always opt back into memory by not setting `NODE_ENV=production` (e.g. staging).
+Whenever the in-memory store is actually used (any environment), a warning is logged on startup so
+the behavior is never silent.
+
+MongoDB support (`mongodb-queue-store.ts`) exists in the codebase but is not currently wired up:
+the `mongoose` package is not an installed dependency, so selecting it falls back to SQLite rather
+than crashing the process on a missing module.
+
+## DLQ TTL Eviction
+
+DLQ entries are not cleaned up automatically by writing or reading them — without eviction they
+would accumulate forever. A background task, started alongside the retry worker in
+`server.ts`, periodically deletes entries older than a configurable TTL:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `DLQ_TTL_DAYS` | `7` | Age (in days) after which a DLQ entry is evicted. Non-numeric, zero, or negative values fall back to the default with a warning. |
+
+The eviction task runs once every 24 hours and logs the number of entries deleted on each run
+(`oracle_dlq: TTL eviction run complete`, with a `deleted` count). It is implemented in
+`apps/backend/src/queue.ts` as `evictExpiredDlqEntries()` (the single eviction pass, unit-testable
+without a timer) wrapped by `startDlqEvictionTask()` (the periodic scheduler, stopped on graceful
+shutdown alongside the retry worker and polling worker).
+
 ## Configuration
 
 Set the oracle admin key in `.env`:

@@ -31,5 +31,7 @@ describe('/health endpoint', () => {
     expect(response.body.status).toBe('error');
     expect(response.body.uptime).toBeGreaterThanOrEqual(0);
     expect(response.body.version).toBe('1.2.3');
+    // #45 — unreachable RPC is reported via dependencies.stellar_rpc
+    expect(response.body.dependencies).toEqual({ stellar_rpc: 'unreachable' });
   });
 });

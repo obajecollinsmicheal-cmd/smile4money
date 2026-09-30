@@ -17,6 +17,43 @@
 import logger from '../logger.js';
 import type { MatchResult, GameResult } from '../fetchers/lichess.js';
 
+/** Used when POLLING_INTERVAL_MS is unset. */
+const DEFAULT_POLLING_INTERVAL_MS = 30_000;
+
+/**
+ * Parses and validates the POLLING_INTERVAL_MS environment variable (#34).
+ *
+ * Returns DEFAULT_POLLING_INTERVAL_MS when `rawValue` is undefined or empty
+ * (the env var was not set). Throws a clear, actionable error for anything
+ * else that isn't a finite, positive number — a non-numeric value, zero, or
+ * a negative number would otherwise reach `setTimeout` as `NaN` or `<= 0`,
+ * either firing immediately or looping the polling cycle far faster than
+ * intended and hammering the chess-platform APIs. Callers (see server.ts)
+ * are expected to let this throw during startup rather than catch it, so a
+ * misconfigured deployment fails loudly instead of silently mis-polling.
+ */
+export function parsePollingIntervalMs(rawValue: string | undefined): number {
+  if (rawValue === undefined || rawValue.trim() === '') {
+    return DEFAULT_POLLING_INTERVAL_MS;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(
+      `Invalid POLLING_INTERVAL_MS: "${rawValue}" is not a valid number. ` +
+        'Expected a positive integer number of milliseconds, e.g. 30000.',
+    );
+  }
+  if (parsed <= 0) {
+    throw new Error(
+      `Invalid POLLING_INTERVAL_MS: ${parsed} must be greater than 0. ` +
+        'Expected a positive integer number of milliseconds, e.g. 30000.',
+    );
+  }
+
+  return parsed;
+}
+
 export interface PollJob {
   id: string;
   matchId: number;
@@ -103,7 +140,7 @@ export interface PollingConfig {
  *   - Linear backoff (multiplier=1.1): 30s, 33s, 36.3s, ...
  *   - Exponential backoff (multiplier=1.5): 30s, 45s, 67.5s, ...
  */
-function calculateNextPollDelay(
+export function calculateNextPollDelay(
   attempt: number,
   baseIntervalMs: number,
   backoffMultiplier: number,
@@ -118,11 +155,22 @@ function calculateNextPollDelay(
 export class PollingJobStore {
   private jobs = new Map<string, PollJob>();
   private matchIdToJobId = new Map<number, string>();
+  private matchGameKeyToJobId = new Map<string, string>();
+
+  private static matchGameKey(matchId: number, gameId: string): string {
+    return `${matchId}::${gameId}`;
+  }
 
   /**
    * Create a new polling job.
    *
-   * @throws Error if a job already exists for this matchId
+   * Deduplicated on the (matchId, gameId) pair rather than matchId alone
+   * (#46): if a cancelled match's matchId is later reused by a new match
+   * (e.g. after a counter reset), the new match's game_id will differ from
+   * the old one, so it must still be pollable as a distinct job instead of
+   * being rejected as a duplicate of the cancelled match.
+   *
+   * @throws Error if a job already exists for this exact (matchId, gameId) pair
    */
   createJob(
     matchId: number,
@@ -132,8 +180,11 @@ export class PollingJobStore {
     createdAtLedger?: number,
     timeoutLedgers?: number,
   ): PollJob {
-    if (this.matchIdToJobId.has(matchId)) {
-      throw new Error(`Polling job already exists for match ${matchId}`);
+    const key = PollingJobStore.matchGameKey(matchId, gameId);
+    if (this.matchGameKeyToJobId.has(key)) {
+      throw new Error(
+        `Polling job already exists for match ${matchId} (game ${gameId})`,
+      );
     }
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -151,7 +202,11 @@ export class PollingJobStore {
     };
 
     this.jobs.set(id, job);
+    // Tracks the (most recently created) job for a bare matchId lookup —
+    // in the common case there is only ever one active job per match, but
+    // this must not be the dedup key itself (see matchGameKeyToJobId above).
     this.matchIdToJobId.set(matchId, id);
+    this.matchGameKeyToJobId.set(key, id);
 
     logger.info(
       { match_id: matchId, game_id: gameId, platform },
@@ -200,7 +255,7 @@ export class PollingJobStore {
   completeJob(jobId: string): void {
     const job = this.jobs.get(jobId);
     if (job) {
-      this.matchIdToJobId.delete(job.matchId);
+      this.removeJobIndexes(job);
       this.jobs.delete(jobId);
       logger.info(
         { match_id: job.matchId, polling_attempts: job.pollingAttempt },
@@ -215,8 +270,24 @@ export class PollingJobStore {
   removeJob(jobId: string): void {
     const job = this.jobs.get(jobId);
     if (job) {
-      this.matchIdToJobId.delete(job.matchId);
+      this.removeJobIndexes(job);
       this.jobs.delete(jobId);
+    }
+  }
+
+  /**
+   * Clear this job's entries from the lookup indexes, but only if they
+   * still point at this job — with (matchId, gameId) dedup (#46), a second
+   * job can share a matchId with this one, and completing/removing this job
+   * must not clobber the other job's still-valid matchId lookup entry.
+   */
+  private removeJobIndexes(job: PollJob): void {
+    const key = PollingJobStore.matchGameKey(job.matchId, job.gameId);
+    if (this.matchGameKeyToJobId.get(key) === job.id) {
+      this.matchGameKeyToJobId.delete(key);
+    }
+    if (this.matchIdToJobId.get(job.matchId) === job.id) {
+      this.matchIdToJobId.delete(job.matchId);
     }
   }
 
@@ -226,6 +297,7 @@ export class PollingJobStore {
   clear(): void {
     this.jobs.clear();
     this.matchIdToJobId.clear();
+    this.matchGameKeyToJobId.clear();
   }
 }
 
@@ -567,4 +639,5 @@ export default {
   PollingJobStore,
   PollingWorker,
   calculateNextPollDelay,
+  parsePollingIntervalMs,
 };

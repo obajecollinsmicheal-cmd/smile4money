@@ -2,9 +2,9 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import { app } from './app.js';
-import { initializeQueue, closeQueue, startRetryWorker, listDlqEntries, writeToDlq, type DlqEntry } from './queue.js';
+import { initializeQueue, closeQueue, startRetryWorker, startDlqEvictionTask, listDlqEntries, writeToDlq, type DlqEntry } from './queue.js';
 import { initializeMatchStore } from './store/index.js';
-import { PollingJobStore, PollingWorker } from './services/polling.js';
+import { PollingJobStore, PollingWorker, parsePollingIntervalMs } from './services/polling.js';
 import ChessPlatformPoller from './services/game-poller.js';
 import { getCurrentLedger } from './services/stellar.js';
 import { loadRetryConfig, submitWithIdempotence, type OracleSubmission } from './services/oracle-submit.js';
@@ -98,11 +98,14 @@ async function main() {
     // Start the retry worker
     const stopRetryWorker = startRetryWorker(retryOracleSubmission, 60_000);
 
+    // Start the DLQ TTL eviction task (deletes entries older than DLQ_TTL_DAYS)
+    const stopDlqEviction = startDlqEvictionTask();
+
     // Set up the polling worker with DLQ wiring for max-attempts exceeded
     const pollingStore = new PollingJobStore();
     const gamePoller = new ChessPlatformPoller();
     const pollingWorker = new PollingWorker(pollingStore, gamePoller, {
-      pollingIntervalMs: Number(process.env.POLLING_INTERVAL_MS ?? 30_000),
+      pollingIntervalMs: parsePollingIntervalMs(process.env.POLLING_INTERVAL_MS),
       maxPollingAttempts: Number(process.env.MAX_POLLING_ATTEMPTS ?? 1440),
       backoffMultiplier: Number(process.env.POLLING_BACKOFF_MULTIPLIER ?? 1.0),
       // #51 — lets the worker detect a match that has exceeded the escrow
@@ -155,6 +158,7 @@ async function main() {
       logger.info('Shutting down gracefully...');
       stopPollingWorker();
       stopRetryWorker();
+      stopDlqEviction();
       await closeQueue();
       server.close(() => {
         logger.info('Server closed');

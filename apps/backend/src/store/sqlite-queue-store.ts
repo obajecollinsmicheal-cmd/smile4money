@@ -17,6 +17,7 @@
 
 import sqlite3 from "sqlite3";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import type {
   DlqEntry,
@@ -133,8 +134,63 @@ export class SQLiteQueueStore implements PersistentQueueStore {
   }
 
   async initialize(): Promise<void> {
-    await withRetry<void>("initialize:open", (cb) => {
-      this.db = new sqlite3.Database(this.dbPath, (err: Error | null) => cb(err));
+    // Ensure the data directory exists
+    const dir = path.dirname(this.dbPath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+
+    return new Promise((resolve, reject) => {
+      this.db = new sqlite3.Database(this.dbPath, (err: Error | null) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+
+        // WAL allows readers to continue while writes are in progress.
+        this.db!.run(`PRAGMA journal_mode=WAL`, (err: Error | null) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          // Create table if not exists
+          this.db!.run(
+            `
+          CREATE TABLE IF NOT EXISTS oracle_dlq (
+            id TEXT PRIMARY KEY NOT NULL,
+            payload TEXT NOT NULL,
+            failureReason TEXT NOT NULL,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            createdAt INTEGER NOT NULL,
+            lastAttemptAt INTEGER,
+            expireAt INTEGER NOT NULL,
+            CONSTRAINT expireAt_check CHECK (expireAt > 0)
+          )
+            `,
+            (err: Error | null) => {
+              if (err) {
+                reject(err);
+                return;
+              }
+
+              // Create index for efficient queries and TTL cleanup
+              this.db!.run(
+                `CREATE INDEX IF NOT EXISTS idx_oracle_dlq_expireAt ON oracle_dlq(expireAt)`,
+                (err: Error | null) => {
+                  if (err) {
+                    reject(err);
+                    return;
+                  }
+
+                  this.initialized = true;
+                  resolve();
+                },
+              );
+            },
+          );
+        });
+      });
     });
 
     // WAL allows readers to continue while writes are in progress.

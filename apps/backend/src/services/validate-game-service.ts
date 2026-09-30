@@ -9,6 +9,7 @@
 import { fetchLichessResult, GameNotFoundError } from '../fetchers/lichess.js';
 import { fetchChessDotComResult } from '../fetchers/chessdotcom.js';
 import type { MatchResult } from '../fetchers/lichess.js';
+import { errorToHttpStatus } from '../errors/errorToHttpStatus.js';
 
 export interface ValidateGameInput {
   gameId: string;
@@ -29,7 +30,7 @@ export interface ValidateGameSuccess {
 
 export interface ValidateGameNotFound {
   ok: false;
-  status: 404;
+  status: number;
   valid: false;
   platform: string;
   gameId: string;
@@ -38,7 +39,7 @@ export interface ValidateGameNotFound {
 
 export interface ValidateGameError {
   ok: false;
-  status: 400 | 500;
+  status: number;
   error?: string;
   valid?: false;
   platform?: string;
@@ -111,7 +112,7 @@ export async function validateGame(input: ValidateGameInput): Promise<ValidateGa
     if (error instanceof GameNotFoundError) {
       return {
         ok: false,
-        status: 404,
+        status: errorToHttpStatus(error),
         valid: false,
         platform,
         gameId,
@@ -121,7 +122,7 @@ export async function validateGame(input: ValidateGameInput): Promise<ValidateGa
     const message = error instanceof Error ? error.message : 'Unknown error';
     return {
       ok: false,
-      status: 500,
+      status: errorToHttpStatus(error),
       valid: false,
       platform,
       gameId,

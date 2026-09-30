@@ -12,6 +12,7 @@ import { verifyPlayerIdentities } from './player-identity.js';
 import type { PlayerIdentityMap } from './player-identity.js';
 import type { MatchStore } from '../store/match-store.js';
 import logger from '../logger.js';
+import { errorToHttpStatus, ValidationError, NotFoundError } from '../errors/errorToHttpStatus.js';
 
 export interface SubmitResultInput {
   matchId: number;
@@ -34,7 +35,7 @@ export interface SubmitResultSuccess {
 
 export interface SubmitResultFailure {
   ok: false;
-  status: 400 | 404 | 500;
+  status: number;
   error: string;
   details?: string;
   hint?: string;
@@ -93,7 +94,7 @@ export async function verifyGameResult(
       );
       return {
         ok: false,
-        status: 404,
+        status: errorToHttpStatus(new NotFoundError('Match not found')),
         error: 'Match not found',
         details: `No match found for gameId: ${gameId}. The match store is empty — the server may have restarted and lost in-memory state. Check your persistence configuration (QUEUE_STORE env var) and ensure matches are written to a durable store before deploying.`,
         hint: 'persistence_loss_suspected',
@@ -106,7 +107,7 @@ export async function verifyGameResult(
     );
     return {
       ok: false,
-      status: 404,
+      status: errorToHttpStatus(new NotFoundError('Match not found')),
       error: 'Match not found',
       details: `No match found for gameId: ${gameId}`,
     };
@@ -116,7 +117,7 @@ export async function verifyGameResult(
   if (!match.player1Username || !match.player2Username) {
     return {
       ok: false,
-      status: 400,
+      status: errorToHttpStatus(new ValidationError('Player identities not recorded')),
       error: 'Player identities not recorded',
       details: 'Match was created without capturing player identities from the API',
     };
@@ -134,7 +135,7 @@ export async function verifyGameResult(
     if (error instanceof GameNotFoundError) {
       return {
         ok: false,
-        status: 404,
+        status: errorToHttpStatus(error),
         error: 'Game not found on platform',
         details: error.message,
       };
@@ -156,7 +157,7 @@ export async function verifyGameResult(
   if (!verification.valid) {
     return {
       ok: false,
-      status: 400,
+      status: errorToHttpStatus(new ValidationError('Player identity verification failed')),
       error: 'Player identity verification failed',
       details: verification.error,
     };

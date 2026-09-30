@@ -69,7 +69,9 @@ export async function checkStellarRpc(): Promise<void> {
       jsonrpc: "2.0",
     },
     {
-      timeout: 5000,
+      // Bounded independently of other RPC calls so a slow/unresponsive RPC
+      // can't block the health endpoint itself (#45).
+      timeout: 3000,
       headers: {
         "Content-Type": "application/json",
       },

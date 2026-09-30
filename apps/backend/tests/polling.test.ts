@@ -14,6 +14,7 @@ import {
   PollingJobStore,
   PollingWorker,
   calculateNextPollDelay,
+  parsePollingIntervalMs,
   type PollJob,
   type GamePoller,
 } from '../src/services/polling.js';
@@ -473,6 +474,38 @@ describe('Game Polling System', () => {
       const job2 = store.createJob(2, 'game-2', 'lichess');
 
       expect(job1.id).not.toBe(job2.id);
+    });
+  });
+
+  describe('parsePollingIntervalMs (#34)', () => {
+    it('returns the default when the env var is unset', () => {
+      expect(parsePollingIntervalMs(undefined)).toBe(30_000);
+    });
+
+    it('returns the default when the env var is an empty string', () => {
+      expect(parsePollingIntervalMs('')).toBe(30_000);
+      expect(parsePollingIntervalMs('   ')).toBe(30_000);
+    });
+
+    it('parses a valid numeric string', () => {
+      expect(parsePollingIntervalMs('45000')).toBe(45_000);
+    });
+
+    it('throws a clear error for a non-numeric value', () => {
+      expect(() => parsePollingIntervalMs('abc')).toThrow(/Invalid POLLING_INTERVAL_MS/);
+      expect(() => parsePollingIntervalMs('abc')).toThrow(/"abc"/);
+    });
+
+    it('throws a clear error for zero', () => {
+      expect(() => parsePollingIntervalMs('0')).toThrow(/Invalid POLLING_INTERVAL_MS/);
+    });
+
+    it('throws a clear error for a negative value', () => {
+      expect(() => parsePollingIntervalMs('-5000')).toThrow(/Invalid POLLING_INTERVAL_MS/);
+    });
+
+    it('throws for Infinity/NaN-producing input', () => {
+      expect(() => parsePollingIntervalMs('Infinity')).toThrow(/Invalid POLLING_INTERVAL_MS/);
     });
   });
 });

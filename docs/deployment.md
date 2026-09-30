@@ -630,6 +630,29 @@ Add this check to your post-deploy checklist:
 - [ ] sha256sum of oracle.wasm matches CONTRACT_ORACLE wasm_hash on-chain
 ```
 
+## Backend Service Deployment
+
+The off-chain oracle service (`apps/backend`) has its own persistence requirements, separate from
+the on-chain contracts above.
+
+**Never deploy the backend with `QUEUE_STORE=memory`.** The dead-letter queue (DLQ) holds oracle
+submissions that already failed once; an in-memory store loses them on every restart or redeploy,
+turning a transient failure into a silent, permanent one. `QUEUE_STORE` defaults to a durable
+SQLite store, and if `NODE_ENV=production` is set alongside `QUEUE_STORE=memory` the service
+auto-corrects to SQLite and logs a warning rather than starting up with lossy storage.
+
+Checklist for a production backend deploy:
+
+- [ ] `NODE_ENV=production` is set
+- [ ] `QUEUE_STORE` is unset, `auto`, or `sqlite` (not `memory`)
+- [ ] The SQLite data directory (`apps/backend/data/`) is on a persistent volume — not an ephemeral
+      container filesystem that is wiped on redeploy
+- [ ] `DLQ_TTL_DAYS` is set to a retention period appropriate for your incident-response process
+      (default 7 days)
+
+See `docs/oracle.md#queue-store-persistence` and `docs/oracle.md#dlq-ttl-eviction` for the full
+configuration reference.
+
 ## Troubleshooting
 
 ### `stellar: command not found`

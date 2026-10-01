@@ -1,20 +1,50 @@
 import { Request, Response, NextFunction } from 'express';
 import { ErrorCode, errorEnvelope } from '../errors/errorResponse.js';
+import { SqliteRateLimitStore } from '../store/sqlite-rate-limit-store.js';
+import logger from '../logger.js';
 
 /**
- * Simple in-memory rate limiter using token bucket algorithm.
- * Tracks requests per IP address.
+ * Result of a rate-limit check: whether the request is allowed, and — when
+ * not — how long the caller should wait before retrying.
+ */
+export interface RateLimitResult {
+  allowed: boolean;
+  retryAfterSeconds?: number;
+}
+
+/**
+ * A pluggable rate-limit counter backend (#1723).
  *
- * For production, consider using:
- * - redis-based rate limiting (cluster-aware)
- * - external services like Cloudflare, AWS WAF
+ * `RateLimitStore` (in-memory, below) and `SqliteRateLimitStore`
+ * (`store/sqlite-rate-limit-store.ts`) both implement this. The middleware
+ * only ever depends on this interface, never on a concrete backend, so
+ * swapping backends via `RATE_LIMIT_STORE` requires no change to
+ * `createRateLimitMiddleware` or the routes that use it.
+ */
+export interface RateLimitBackend {
+  isAllowed(clientId: string): Promise<RateLimitResult>;
+  getRemainingTokens(clientId: string): Promise<number>;
+  destroy(): Promise<void> | void;
+}
+
+/**
+ * In-memory token-bucket rate limiter. Tracks requests per IP address.
+ *
+ * Each process keeps its own counters — in a horizontally scaled deployment
+ * with multiple backend instances behind a load balancer, each instance
+ * enforces the configured limit independently, effectively multiplying the
+ * real allowed rate by the instance count (#1723). Use
+ * `SqliteRateLimitStore` (via `RATE_LIMIT_STORE=sqlite`) for a limit that
+ * holds across instances; this remains the default for local development
+ * and single-instance deployments, where the shared-storage overhead buys
+ * nothing.
  */
 interface ClientBucket {
   tokens: number;
   lastRefill: number;
 }
 
-export class RateLimitStore {
+export class RateLimitStore implements RateLimitBackend {
   private buckets: Map<string, ClientBucket> = new Map();
   private readonly capacity: number;
   private readonly refillIntervalMs: number;
@@ -42,7 +72,7 @@ export class RateLimitStore {
    * Returns true if the request is allowed, false if rate limited.
    * When rate limited, also returns the time in seconds until the next token is available.
    */
-  isAllowed(clientId: string): { allowed: boolean; retryAfterSeconds?: number } {
+  async isAllowed(clientId: string): Promise<RateLimitResult> {
     const now = Date.now();
     let bucket = this.buckets.get(clientId);
 
@@ -82,7 +112,7 @@ export class RateLimitStore {
   /**
    * Get the number of remaining tokens for a client (for diagnostics).
    */
-  getRemainingTokens(clientId: string): number {
+  async getRemainingTokens(clientId: string): Promise<number> {
     const bucket = this.buckets.get(clientId);
     if (!bucket) {
       return this.capacity;
@@ -137,18 +167,18 @@ interface RateLimitMiddlewareOptions {
 /**
  * Express middleware factory for rate limiting by IP address.
  *
- * @param store - RateLimitStore instance
+ * @param store - Any RateLimitBackend (in-memory or SQLite-backed; #1723)
  * @param options - Configuration options
  * @returns Express middleware function
  *
  * Example usage:
  * ```
- * const limiter = new RateLimitStore(100, 60000, 100); // 100 req/min
+ * const limiter = await createRateLimitStore(100, 60000, 100); // 100 req/min
  * router.use(createRateLimitMiddleware(limiter, { trustedProxies: ['127.0.0.1'] }));
  * ```
  */
 export function createRateLimitMiddleware(
-  store: RateLimitStore,
+  store: RateLimitBackend,
   options?: RateLimitMiddlewareOptions,
 ) {
   const trustedProxies = options?.trustedProxies || [];
@@ -158,24 +188,96 @@ export function createRateLimitMiddleware(
 
   return (req: Request, res: Response, next: NextFunction) => {
     const clientId = keyExtractor(req);
-    const result = store.isAllowed(clientId);
 
-    // Set rate limit headers for all responses
-    const remainingTokens = store.getRemainingTokens(clientId);
-    res.setHeader('X-RateLimit-Limit', '100'); // capacity
-    res.setHeader('X-RateLimit-Remaining', String(Math.max(0, remainingTokens)));
+    store
+      .isAllowed(clientId)
+      .then(async (result) => {
+        // Set rate limit headers for all responses
+        const remainingTokens = await store.getRemainingTokens(clientId);
+        res.setHeader('X-RateLimit-Limit', '100'); // capacity
+        res.setHeader('X-RateLimit-Remaining', String(Math.max(0, remainingTokens)));
 
-    if (!result.allowed) {
-      // Set Retry-After header per RFC 6585
-      if (result.retryAfterSeconds) {
-        res.setHeader('Retry-After', String(result.retryAfterSeconds));
-      }
+        if (!result.allowed) {
+          // Set Retry-After header per RFC 6585
+          if (result.retryAfterSeconds) {
+            res.setHeader('Retry-After', String(result.retryAfterSeconds));
+          }
 
-      return res.status(statusCode).json(errorEnvelope(ErrorCode.RATE_LIMITED, message));
-    }
+          res.status(statusCode).json(errorEnvelope(ErrorCode.RATE_LIMITED, message));
+          return;
+        }
 
-    next();
+        next();
+      })
+      .catch((error) => {
+        // A rate-limit backend failure (e.g. the shared SQLite file is
+        // temporarily locked) must not take the whole route down with it —
+        // log and fail open, since a brief lapse in rate limiting is a much
+        // smaller problem than refusing all traffic because the limiter
+        // itself errored.
+        logger.error(
+          { error: error instanceof Error ? error.message : String(error) },
+          'rate_limit_backend_error_failing_open',
+        );
+        next();
+      });
   };
+}
+
+export type RateLimitStoreType = 'memory' | 'sqlite';
+
+/**
+ * Decide which rate-limit backend to use for a given `RATE_LIMIT_STORE`
+ * value, without touching disk (#1723). Exported for unit testing, mirroring
+ * `queue.ts`'s `resolveQueueStoreType`.
+ *
+ *   'sqlite' / 'redis' (not yet implemented, falls back to sqlite) → sqlite
+ *   'memory' / unset                                               → memory
+ *
+ * Unlike the queue store, memory stays the default here even in production:
+ * a single-instance deployment gains nothing from the SQLite backend's extra
+ * I/O, and this is only a real correctness issue once an operator actually
+ * runs more than one backend instance — at which point they are expected to
+ * set `RATE_LIMIT_STORE=sqlite` explicitly, which also makes the choice to
+ * accept the shared-file write contention a deliberate one rather than an
+ * invisible default.
+ */
+export function resolveRateLimitStoreType(rawValue: string | undefined): RateLimitStoreType {
+  const requested = (rawValue || 'memory').toLowerCase();
+  if (requested === 'sqlite' || requested === 'redis') {
+    if (requested === 'redis') {
+      logger.warn(
+        { requested },
+        'rate_limit: RATE_LIMIT_STORE=redis requested but no Redis client is installed; falling back to sqlite',
+      );
+    }
+    return 'sqlite';
+  }
+  return 'memory';
+}
+
+/**
+ * Build and initialize a `RateLimitBackend` per the `RATE_LIMIT_STORE`
+ * environment variable (#1723). This is the entry point routes should use
+ * instead of constructing `RateLimitStore` directly, so the backend they get
+ * is configurable without the route itself knowing which one is active.
+ */
+export async function createRateLimitStore(
+  capacity: number,
+  refillIntervalMs: number,
+  refillAmount: number,
+  dbPath?: string,
+): Promise<RateLimitBackend> {
+  const resolved = resolveRateLimitStoreType(process.env.RATE_LIMIT_STORE);
+
+  if (resolved === 'memory') {
+    return new RateLimitStore(capacity, refillIntervalMs, refillAmount);
+  }
+
+  const store = new SqliteRateLimitStore(capacity, refillIntervalMs, refillAmount, dbPath);
+  await store.initialize();
+  logger.info({ store: resolved }, 'rate_limit: store initialized');
+  return store;
 }
 
 /**

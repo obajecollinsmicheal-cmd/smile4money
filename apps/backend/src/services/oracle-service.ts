@@ -8,7 +8,7 @@
 
 import { fetchLichessResult, GameNotFoundError } from '../fetchers/lichess.js';
 import { fetchChessDotComResult } from '../fetchers/chessdotcom.js';
-import { verifyPlayerIdentities } from './player-identity.js';
+import { verifyPlayerIdentities, verifyIdentityHash } from './player-identity.js';
 import type { PlayerIdentityMap } from './player-identity.js';
 import type { MatchStore } from '../store/match-store.js';
 import logger from '../logger.js';
@@ -123,13 +123,40 @@ export async function verifyGameResult(
     };
   }
 
-  // Fetch the game result from the chess platform API
+  // #1721 — the fetcher used to pull a result must be the platform the match
+  // was actually created on (match.platform), never the caller-supplied
+  // `platform` from the request body. Without this check, a caller could ask
+  // the oracle to verify a Lichess match's gameId against the Chess.com API
+  // (or vice versa) by simply passing a different `platform` value, which
+  // would either fail confusingly deep in the fetcher or — if the gameId
+  // happened to also resolve on the other platform — verify the wrong game
+  // entirely. `match.platform` is immutable after creation, so it is the
+  // only trustworthy source for which fetcher to use.
+  if (platform !== match.platform) {
+    return {
+      ok: false,
+      status: errorToHttpStatus(new ValidationError('Platform mismatch')),
+      error: 'Platform mismatch',
+      details: `Match ${match.matchId} was created on platform '${match.platform}', but this request specified '${platform}'. The platform used to verify a result must match the platform recorded at match creation.`,
+    };
+  }
+
+  // Fetch the game result from the chess platform API, using the match's own
+  // recorded platform (now confirmed consistent with the request above) as
+  // the sole source of truth for fetcher selection.
   let apiResult;
   try {
-    if (platform === 'lichess') {
+    if (match.platform === 'lichess') {
       apiResult = await fetchLichessResult(gameId);
-    } else {
+    } else if (match.platform === 'chessdotcom') {
       apiResult = await fetchChessDotComResult(username as string, gameId);
+    } else {
+      return {
+        ok: false,
+        status: errorToHttpStatus(new ValidationError('Unknown platform')),
+        error: 'Unknown platform',
+        details: `Match ${match.matchId} has an unrecognized platform '${match.platform}'; expected 'lichess' or 'chessdotcom'.`,
+      };
     }
   } catch (error) {
     if (error instanceof GameNotFoundError) {
@@ -160,6 +187,21 @@ export async function verifyGameResult(
       status: errorToHttpStatus(new ValidationError('Player identity verification failed')),
       error: 'Player identity verification failed',
       details: verification.error,
+    };
+  }
+
+  // #1720 — the identity hash bound to the match at creation time must still
+  // match a hash recomputed from its current fields. A divergence means the
+  // identity captured at creation is no longer what the record now shows —
+  // reject rather than accept a result against an identity that may have
+  // been swapped after creation.
+  const identityHashCheck = verifyIdentityHash(match);
+  if (!identityHashCheck.valid) {
+    return {
+      ok: false,
+      status: errorToHttpStatus(new ValidationError('Identity hash verification failed')),
+      error: 'Identity hash verification failed',
+      details: identityHashCheck.error,
     };
   }
 

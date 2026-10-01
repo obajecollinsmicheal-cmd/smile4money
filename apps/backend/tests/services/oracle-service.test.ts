@@ -270,4 +270,99 @@ describe('verifyGameResult', () => {
     expect(mockFetchChess).toHaveBeenCalledWith('alice', 'lichess-game-abc');
     expect(mockFetchLichess).not.toHaveBeenCalled();
   });
+
+  // #1721 — the fetcher used must match the platform the match was actually
+  // created with (match.platform), never the caller-supplied request field.
+  describe('platform consistency (#1721)', () => {
+    it('rejects a chessdotcom request against a match created on lichess', async () => {
+      await seedMatch(store, { platform: 'lichess' });
+
+      const result = await verifyGameResult(store, {
+        matchId: 0,
+        gameId: 'lichess-game-abc',
+        platform: 'chessdotcom',
+        username: 'alice',
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toBe('Platform mismatch');
+        expect(result.details).toContain('lichess');
+        expect(result.details).toContain('chessdotcom');
+      }
+      // Neither fetcher should ever be called once the mismatch is caught.
+      expect(mockFetchLichess).not.toHaveBeenCalled();
+      expect(mockFetchChess).not.toHaveBeenCalled();
+    });
+
+    it('rejects a lichess request against a match created on chessdotcom', async () => {
+      await seedMatch(store, { platform: 'chessdotcom' });
+
+      const result = await verifyGameResult(store, {
+        matchId: 0,
+        gameId: 'lichess-game-abc',
+        platform: 'lichess',
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toBe('Platform mismatch');
+      }
+      expect(mockFetchLichess).not.toHaveBeenCalled();
+      expect(mockFetchChess).not.toHaveBeenCalled();
+    });
+
+    it('uses only the lichess fetcher for a match actually created on lichess', async () => {
+      await seedMatch(store, { platform: 'lichess' });
+      mockFetchLichess.mockResolvedValue(LICHESS_GAME);
+
+      const result = await verifyGameResult(store, {
+        matchId: 0,
+        gameId: 'lichess-game-abc',
+        platform: 'lichess',
+      });
+
+      expect(result.ok).toBe(true);
+      expect(mockFetchLichess).toHaveBeenCalledWith('lichess-game-abc');
+      expect(mockFetchChess).not.toHaveBeenCalled();
+    });
+  });
+
+  // #1720 — the oracle must reject a result if the match's bound identity
+  // hash no longer matches its current fields.
+  describe('identity hash verification (#1720)', () => {
+    it('rejects a result when the match identity hash has been tampered with', async () => {
+      const match = await seedMatch(store);
+      // Simulate the identity having diverged from what the hash was
+      // originally bound to (e.g. a swap after creation) by corrupting the
+      // stored hash directly, bypassing the normal creation path.
+      match.identityHash = '0'.repeat(64);
+      mockFetchLichess.mockResolvedValue(LICHESS_GAME);
+
+      const result = await verifyGameResult(store, {
+        matchId: 0,
+        gameId: 'lichess-game-abc',
+        platform: 'lichess',
+      });
+
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.error).toBe('Identity hash verification failed');
+        expect(result.details).toContain('Identity hash mismatch');
+      }
+    });
+
+    it('accepts a result when the match identity hash matches (the normal case)', async () => {
+      await seedMatch(store);
+      mockFetchLichess.mockResolvedValue(LICHESS_GAME);
+
+      const result = await verifyGameResult(store, {
+        matchId: 0,
+        gameId: 'lichess-game-abc',
+        platform: 'lichess',
+      });
+
+      expect(result.ok).toBe(true);
+    });
+  });
 });

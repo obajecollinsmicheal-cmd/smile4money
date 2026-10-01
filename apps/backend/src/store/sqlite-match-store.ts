@@ -10,6 +10,7 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 import type { MatchRecord } from './match-store.js';
+import { computeIdentityHash } from '../services/player-identity.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -67,7 +68,8 @@ export class SqliteMatchStore {
             token TEXT NOT NULL,
             gameId TEXT NOT NULL UNIQUE,
             platform TEXT NOT NULL,
-            state TEXT NOT NULL DEFAULT 'Pending'
+            state TEXT NOT NULL DEFAULT 'Pending',
+            identityHash TEXT
           )
           `,
           (err: Error | null) => {
@@ -96,10 +98,22 @@ export class SqliteMatchStore {
   }
 
   async createMatch(payload: CreateMatchPayload): Promise<MatchRecord> {
+    // #1720 — see match-store.ts's MatchStore.createMatch for the rationale;
+    // kept identical here so both store implementations bind the same way.
+    const identityHash =
+      payload.player1Username && payload.player2Username
+        ? computeIdentityHash(
+            payload.player1Username,
+            payload.player1,
+            payload.player2Username,
+            payload.player2,
+          )
+        : null;
+
     return new Promise((resolve, reject) => {
       const stmt = this.getDb().prepare(
-        `INSERT INTO matches (matchId, player1, player2, player1Username, player2Username, stakeAmount, token, gameId, platform, state)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending')`,
+        `INSERT INTO matches (matchId, player1, player2, player1Username, player2Username, stakeAmount, token, gameId, platform, state, identityHash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?)`,
       );
 
       const matchId = this.nextId++;
@@ -113,6 +127,7 @@ export class SqliteMatchStore {
         payload.token,
         payload.gameId,
         payload.platform,
+        identityHash,
         function (this: sqlite3.RunResult, err: Error | null) {
           if (err) {
             reject(err);
@@ -129,6 +144,7 @@ export class SqliteMatchStore {
             gameId: payload.gameId,
             platform: payload.platform,
             state: 'Pending',
+            identityHash: identityHash ?? undefined,
           });
         },
       );
@@ -161,6 +177,7 @@ export class SqliteMatchStore {
             gameId: row.gameId,
             platform: row.platform,
             state: row.state,
+            identityHash: row.identityHash ?? undefined,
           });
         },
       );

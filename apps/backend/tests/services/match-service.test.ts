@@ -251,6 +251,9 @@ describe('createMatchForPlayer', () => {
       expect(result.match.state).toBe('Pending');
       expect(result.match.player1Username).toBe('alice');
       expect(result.match.player2Username).toBe('bob');
+      // #1720 — the identity hash binding the match's players is computed
+      // and stored at creation time, before any result has been submitted.
+      expect(result.match.identityHash).toMatch(/^[0-9a-f]{64}$/);
     }
   });
 

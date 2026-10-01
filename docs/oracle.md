@@ -85,6 +85,44 @@ has_result(match_id: u64) -> bool
 - Once a result is submitted it is immutable â€” `AlreadySubmitted` prevents overwriting.
 - The escrow contract independently verifies the caller against its stored oracle address before executing any payout.
 - The oracle contract and escrow contract are separate deployments; a compromised oracle contract does not grant direct access to escrow funds.
+- The off-chain match record's player identities are bound to the match by a hash at creation time (see "Player Identity Binding" below), independently of the on-chain contracts.
+
+## Player Identity Binding
+
+`verifyPlayerIdentities` (`services/player-identity.ts`) checks the usernames
+reported by the chess platform API against the usernames captured in the
+off-chain match record at creation time — but on its own, that only verifies
+against whatever the record *currently* says, with no way to tell whether
+those fields have been altered since the match was created.
+
+To close that gap, every match created with both player usernames also gets
+an **identity hash**: a SHA-256 digest of
+
+```
+normalize(player1Username) : normalize(player1Address) : normalize(player2Username) : normalize(player2Address)
+```
+
+(usernames trimmed and lowercased; Stellar addresses trimmed and uppercased
+to their canonical StrKey form), computed once by
+`computeIdentityHash()` and stored on the match record as `identityHash`.
+Order matters — `(alice, P1, bob, P2)` and `(bob, P1, alice, P2)` produce
+different hashes, so swapping which player occupies which slot is detectable
+even though `verifyPlayerIdentities` itself intentionally accepts a swapped
+color assignment.
+
+Before accepting a result, `verifyGameResult` (`services/oracle-service.ts`)
+calls `verifyIdentityHash()`, which recomputes the digest from the match
+record's *current* `player1`/`player1Username`/`player2`/`player2Username`
+fields and compares it to the stored `identityHash`. Any mismatch is rejected
+with `Identity hash verification failed` and the submission is refused —
+regardless of whether `verifyPlayerIdentities` itself would have passed
+against the (now-divergent) current fields. A match created before this
+field existed (`identityHash` undefined) is treated as valid, falling back to
+`verifyPlayerIdentities` alone, the same behavior as before this existed.
+
+This is independent of, and in addition to, `verifyPlayerIdentities`'s own
+API-vs-record comparison — the hash check guards the integrity of the record
+itself; the username comparison guards the record against the live API.
 
 ## Polling Interval and Job Scheduling
 

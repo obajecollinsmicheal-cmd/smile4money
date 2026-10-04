@@ -67,6 +67,11 @@ pub use constants::*;
 
 use errors::Error;
 use soroban_sdk::{contract, contractimpl, symbol_short, token, vec, Address, Env, String, Symbol, TryFromVal, Vec};
+
+/// Topic symbol for the event emitted when the contract is paused.
+const CONTRACT_PAUSED: Symbol = symbol_short!("paused");
+/// Topic symbol for the event emitted when the contract is unpaused.
+const CONTRACT_UNPAUSED: Symbol = symbol_short!("unpaused");
 use types::{DataKey, Match, MatchState, OptionalWinner, Platform, Winner};
 
 fn is_zero_address(env: &Env, addr: &Address) -> bool {
@@ -105,6 +110,48 @@ pub struct EscrowContract;
 #[allow(missing_docs)]
 #[contractimpl]
 impl EscrowContract {
+    /// Pause the contract, blocking state-changing operations.
+    ///
+    /// Only the admin may call this. Emits a `ContractPaused` event carrying the
+    /// admin address and the current ledger sequence number so the action can be
+    /// detected and audited on-chain.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (CONTRACT_PAUSED, admin.clone()),
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
+    /// Unpause the contract, re-enabling state-changing operations.
+    ///
+    /// Only the admin may call this. Emits a `ContractUnpaused` event carrying the
+    /// admin address and the current ledger sequence number so the action can be
+    /// detected and audited on-chain.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (CONTRACT_UNPAUSED, admin.clone()),
+            env.ledger().sequence(),
+        );
+        Ok(())
+    }
+
     /// Return whether the contract is currently paused.
     pub fn is_paused(env: &Env) -> bool {
         env.storage()

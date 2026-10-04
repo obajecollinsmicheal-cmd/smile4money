@@ -16,6 +16,7 @@
  */
 
 import { RateLimitError } from './RateLimitError.js';
+import { RpcTimeoutError } from './RpcTimeoutError.js';
 import { GameNotFoundError as LichessFetcherGameNotFoundError } from '../fetchers/lichess.js';
 import { GameNotFoundError as LichessServiceGameNotFoundError } from '../services/lichess.js';
 import { UserNotFoundError } from '../services/elo.js';
@@ -88,6 +89,13 @@ export function errorToHttpStatus(error: unknown): number {
   // permanent failure.
   if (RateLimitError.isRateLimitError(error)) {
     return 429;
+  }
+
+  // 504 — an upstream Soroban RPC call did not respond within its configured
+  // timeout (#1718). Distinct from 500: the server itself is fine, a
+  // downstream dependency did not respond in time.
+  if (RpcTimeoutError.isRpcTimeoutError(error)) {
+    return 504;
   }
 
   // 500 — anything else is an unexpected server-side failure.

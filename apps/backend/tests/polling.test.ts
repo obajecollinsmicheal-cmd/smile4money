@@ -50,6 +50,40 @@ class MockGamePoller implements GamePoller {
 }
 
 /**
+ * Poller whose `poll()` blocks until the test explicitly releases it,
+ * simulating a chess-platform API call that is still in flight when
+ * shutdown is requested (#1719).
+ */
+class DelayedGamePoller implements GamePoller {
+  private release: (() => void) | null = null;
+  public pollStarted = false;
+
+  waitUntilStarted(): Promise<void> {
+    if (this.pollStarted) return Promise.resolve();
+    return new Promise((resolve) => {
+      const check = setInterval(() => {
+        if (this.pollStarted) {
+          clearInterval(check);
+          resolve();
+        }
+      }, 5);
+    });
+  }
+
+  releasePoll(): void {
+    this.release?.();
+  }
+
+  async poll(_job: PollJob) {
+    this.pollStarted = true;
+    await new Promise<void>((resolve) => {
+      this.release = resolve;
+    });
+    return { status: 'in_progress' as const };
+  }
+}
+
+/**
  * Mock poller that always returns a failed status with an optional reason.
  */
 class FailingGamePoller implements GamePoller {
@@ -257,6 +291,69 @@ describe('Game Polling System', () => {
       expect(typeof cleanup).toBe('function');
 
       cleanup();
+    });
+
+    // #1719 — graceful shutdown must drain in-flight polling work rather
+    // than abandoning it.
+    describe('graceful shutdown draining', () => {
+      it('stop() waits for an in-flight poll to finish before resolving', async () => {
+        const delayedPoller = new DelayedGamePoller();
+        const delayedStore = new PollingJobStore();
+        delayedStore.createJob(1, 'game-slow', 'lichess');
+
+        const delayedWorker = new PollingWorker(delayedStore, delayedPoller, {
+          pollingIntervalMs: 100,
+          maxPollingAttempts: 5,
+          backoffMultiplier: 1.0,
+          onGameCompleted: vi.fn().mockResolvedValue(undefined),
+          onMaxAttemptsExceeded: vi.fn().mockResolvedValue(undefined),
+        });
+
+        delayedWorker.start();
+        await delayedPoller.waitUntilStarted();
+
+        let stopResolved = false;
+        const stopPromise = delayedWorker.stop().then(() => {
+          stopResolved = true;
+        });
+
+        // stop() must not resolve while the poll it's draining is still
+        // running.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(stopResolved).toBe(false);
+
+        delayedPoller.releasePoll();
+        await stopPromise;
+
+        expect(stopResolved).toBe(true);
+      });
+
+      it('does not start a new polling cycle after stop() has been called', async () => {
+        const delayedPoller = new DelayedGamePoller();
+        const delayedStore = new PollingJobStore();
+        delayedStore.createJob(1, 'game-slow', 'lichess');
+
+        const delayedWorker = new PollingWorker(delayedStore, delayedPoller, {
+          pollingIntervalMs: 10, // short, so a wrongly-scheduled next cycle would fire quickly
+          maxPollingAttempts: 5,
+          backoffMultiplier: 1.0,
+          onGameCompleted: vi.fn().mockResolvedValue(undefined),
+          onMaxAttemptsExceeded: vi.fn().mockResolvedValue(undefined),
+        });
+
+        delayedWorker.start();
+        await delayedPoller.waitUntilStarted();
+
+        const stopPromise = delayedWorker.stop();
+        delayedPoller.releasePoll();
+        await stopPromise;
+
+        // If a new cycle were wrongly scheduled, pollStarted would flip
+        // false->true again once the in-flight poll's own reschedule fired.
+        delayedPoller.pollStarted = false;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        expect(delayedPoller.pollStarted).toBe(false);
+      });
     });
 
     it('increments polling attempt on each poll', async () => {

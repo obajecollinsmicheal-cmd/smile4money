@@ -1,3 +1,5 @@
+import { computeIdentityHash } from '../services/player-identity.js';
+
 export interface MatchRecord {
   matchId: number;
   player1: string;
@@ -9,6 +11,14 @@ export interface MatchRecord {
   gameId: string;
   platform: string;
   state: 'Pending';
+  /**
+   * SHA-256 binding of (player1Username, player1, player2Username, player2),
+   * computed once at creation (#1720). Verified against a fresh recomputation
+   * before the oracle accepts a result — see
+   * `services/player-identity.ts#verifyIdentityHash`. Undefined when the
+   * match was created without both usernames captured (nothing to bind yet).
+   */
+  identityHash?: string;
 }
 
 interface CreateMatchPayload {
@@ -32,6 +42,20 @@ export class MatchStore {
       throw new Error('duplicate game_id');
     }
 
+    // #1720 — bind the identity captured at creation to the match record via
+    // a hash, so a later divergence between the stored usernames/addresses
+    // and what they were at creation time is detectable rather than silently
+    // trusted. Only computable when both usernames were captured.
+    const identityHash =
+      payload.player1Username && payload.player2Username
+        ? computeIdentityHash(
+            payload.player1Username,
+            payload.player1,
+            payload.player2Username,
+            payload.player2,
+          )
+        : undefined;
+
     const record: MatchRecord = {
       matchId: this.nextId,
       player1: payload.player1,
@@ -43,6 +67,7 @@ export class MatchStore {
       gameId: payload.gameId,
       platform: payload.platform,
       state: 'Pending',
+      identityHash,
     };
 
     this.matches.set(this.nextId, record);

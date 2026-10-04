@@ -154,4 +154,58 @@ describe('Structured JSON Logger', () => {
       expect(log.timestamp).toBeDefined();
     });
   });
+
+  // #1722 — log level gating, which request-logging.ts relies on to keep
+  // DEBUG-only output (including request bodies) out of production logs.
+  describe('log level gating', () => {
+    afterEach(() => {
+      delete process.env.LOG_LEVEL;
+    });
+
+    it('defaults to suppressing debug output in production (NODE_ENV=production, no LOG_LEVEL)', () => {
+      // beforeEach already sets NODE_ENV=production.
+      expect(logger.isLevelEnabled('debug')).toBe(false);
+      expect(logger.isLevelEnabled('info')).toBe(true);
+
+      logger.debug({ secret: 'should-not-appear' }, 'debug_event');
+      expect(logOutput.join('')).toBe('');
+    });
+
+    it('defaults to allowing debug output outside production', () => {
+      process.env.NODE_ENV = 'development';
+      expect(logger.isLevelEnabled('debug')).toBe(true);
+
+      logger.debug({ foo: 'bar' }, 'debug_event');
+      expect(logOutput.join('')).not.toBe('');
+    });
+
+    it('LOG_LEVEL=debug overrides the production default', () => {
+      process.env.LOG_LEVEL = 'debug';
+      expect(logger.isLevelEnabled('debug')).toBe(true);
+
+      logger.debug({ foo: 'bar' }, 'debug_event');
+      expect(logOutput.join('')).not.toBe('');
+    });
+
+    it('LOG_LEVEL=error suppresses info and warn, not just debug', () => {
+      process.env.LOG_LEVEL = 'error';
+      expect(logger.isLevelEnabled('debug')).toBe(false);
+      expect(logger.isLevelEnabled('info')).toBe(false);
+      expect(logger.isLevelEnabled('warn')).toBe(false);
+      expect(logger.isLevelEnabled('error')).toBe(true);
+
+      logger.info({}, 'should_be_suppressed');
+      logger.warn({}, 'should_be_suppressed');
+      expect(logOutput.join('')).toBe('');
+
+      logger.error({}, 'should_appear');
+      expect(logOutput.join('')).not.toBe('');
+    });
+
+    it('an invalid LOG_LEVEL value falls back to the environment default rather than throwing', () => {
+      process.env.LOG_LEVEL = 'not-a-real-level';
+      expect(() => logger.info({}, 'still_works')).not.toThrow();
+      expect(logger.isLevelEnabled('info')).toBe(true); // production default
+    });
+  });
 });

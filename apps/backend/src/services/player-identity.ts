@@ -38,6 +38,7 @@
  * the registered players.
  */
 
+import { createHash } from 'node:crypto';
 import type { GameResult } from '../fetchers/lichess.js';
 import type { MatchRecord } from '../store/match-store.js';
 
@@ -151,6 +152,99 @@ export function verifyPlayerIdentities(
     valid: false,
     error: `Player identity mismatch. Expected (${player1Norm}, ${player2Norm}) or (${player2Norm}, ${player1Norm}), but got (${whiteNorm}, ${blackNorm})`,
   };
+}
+
+/**
+ * Identity Hash Binding (#1720)
+ * ─────────────────────────────
+ *
+ * `verifyPlayerIdentities` above checks usernames reported by the chess
+ * platform API against the usernames captured in the match record — but
+ * that captured record itself was never cryptographically bound to the
+ * match. Nothing stopped the stored `player1Username`/`player2Username`
+ * fields from being altered after creation (a storage bug, a future code
+ * path, direct DB access) and `verifyPlayerIdentities` would happily verify
+ * against the *new* value, having no way to tell it had changed.
+ *
+ * `computeIdentityHash` produces a single SHA-256 digest over all four
+ * identity-defining fields (both players' platform usernames and Stellar
+ * addresses) at match-creation time. `MatchStore`/`SqliteMatchStore` persist
+ * it alongside the record as `identityHash`. Before accepting a result,
+ * `verifyIdentityHash` recomputes the digest from the match record's
+ * *current* fields and compares it to the stored one — any divergence means
+ * the identity binding captured at creation no longer matches what is on
+ * record, and the result is rejected rather than silently verified against
+ * whatever the fields now say.
+ *
+ * Hashing (rather than storing the fields a second time) means the stored
+ * fields and the hash can be compared without a separate "trusted copy" to
+ * keep in sync, and the digest is cheap to carry in signed match metadata or
+ * on-chain if the binding later needs to move there.
+ */
+
+/**
+ * Compute the identity-binding hash for a match: SHA-256 of both players'
+ * platform usernames and Stellar addresses, normalized the same way
+ * `verifyPlayerIdentities` normalizes usernames (trimmed, lowercased) so the
+ * hash is stable regardless of incidental casing/whitespace differences
+ * between the value captured at creation and any later re-read of it.
+ * Stellar addresses are uppercased (their canonical StrKey form) rather than
+ * lowercased, so a hash computed here always matches one computed from a
+ * canonically-formatted address regardless of input casing.
+ */
+export function computeIdentityHash(
+  player1Username: string,
+  player1Address: string,
+  player2Username: string,
+  player2Address: string,
+): string {
+  const normalizeUsername = (name: string) => (name || '').trim().toLowerCase();
+  const normalizeAddress = (address: string) => (address || '').trim().toUpperCase();
+
+  const material = [
+    normalizeUsername(player1Username),
+    normalizeAddress(player1Address),
+    normalizeUsername(player2Username),
+    normalizeAddress(player2Address),
+  ].join(':');
+
+  return createHash('sha256').update(material).digest('hex');
+}
+
+/**
+ * Verify that `match`'s stored `identityHash` (set at creation time) still
+ * matches a hash freshly recomputed from the match's current identity
+ * fields. Returns `{ valid: true }` when they match, or when the match
+ * predates this feature and has no stored hash (backward compatibility —
+ * such matches fall back to `verifyPlayerIdentities` alone, same as before
+ * this existed).
+ */
+export function verifyIdentityHash(match: MatchRecord): VerificationResult {
+  if (!match.identityHash) {
+    return { valid: true };
+  }
+  if (!match.player1Username || !match.player2Username) {
+    return {
+      valid: false,
+      error: 'Match has a stored identityHash but is missing the usernames needed to recompute it',
+    };
+  }
+
+  const recomputed = computeIdentityHash(
+    match.player1Username,
+    match.player1,
+    match.player2Username,
+    match.player2,
+  );
+
+  if (recomputed !== match.identityHash) {
+    return {
+      valid: false,
+      error: `Identity hash mismatch for match ${match.matchId}: the stored binding no longer matches the match's current player identities`,
+    };
+  }
+
+  return { valid: true };
 }
 
 /**

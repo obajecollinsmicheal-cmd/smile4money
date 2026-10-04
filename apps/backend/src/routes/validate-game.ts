@@ -1,12 +1,14 @@
 import { Router } from 'express';
-import { RateLimitStore, createRateLimitMiddleware } from '../middleware/rate-limit.js';
+import { createRateLimitStore, createRateLimitMiddleware } from '../middleware/rate-limit.js';
 import { validateGameInput, validateGame } from '../services/validate-game-service.js';
 import { ErrorCode, errorEnvelope, statusToErrorCode } from '../errors/errorResponse.js';
 
 const router = Router();
 
-// Rate limiter: 100 requests per 60 seconds per IP
-const rateLimitStore = new RateLimitStore(100, 60 * 1000, 100);
+// Rate limiter: 100 requests per 60 seconds per IP. Backend (in-memory vs.
+// shared SQLite) is chosen by RATE_LIMIT_STORE (#1723) — see
+// middleware/rate-limit.ts#createRateLimitStore.
+const rateLimitStore = await createRateLimitStore(100, 60 * 1000, 100);
 router.use(createRateLimitMiddleware(rateLimitStore));
 
 router.post('/', async (req, res) => {

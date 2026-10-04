@@ -5,6 +5,7 @@ import matchRouter from './routes/matches.js';
 import validateGameRouter from './routes/validate-game.js';
 import oracleRouter from './routes/oracle.js';
 import { errorToHttpStatus } from './errors/errorToHttpStatus.js';
+import { requestLogging } from './middleware/request-logging.js';
 
 /**
  * Parse the ALLOWED_ORIGINS environment variable into an array of origin strings.
@@ -42,6 +43,9 @@ app.use(
 );
 
 app.use(express.json());
+// #1722 — logs method/path/status/duration at INFO (no body ever); request
+// bodies are only logged at DEBUG, and only after sensitive-field redaction.
+app.use(requestLogging());
 app.use('/health', healthRouter);
 app.use('/api/matches', matchRouter);
 app.use('/api/validate-game', validateGameRouter);

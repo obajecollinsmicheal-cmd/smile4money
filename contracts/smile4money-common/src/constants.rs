@@ -88,6 +88,20 @@ pub const DISPUTE_WINDOW_LEDGERS: u32 = LEDGERS_PER_DAY;
 /// default polling budget.
 pub const TIMEOUT_LEDGERS: u32 = LEDGERS_PER_WEEK;
 
+/// Default match-timeout duration used when no explicit `timeout_ledgers` value
+/// is supplied to [`initialize`].
+///
+/// Equals [`TIMEOUT_LEDGERS`] (~7 days / `120_960` ledgers at the Stellar
+/// 5 s/ledger average). This constant exists so that every `Option::unwrap_or`
+/// fallback in the contract logic names its intent — "this is the default" —
+/// rather than embedding a bare numeric literal or re-using the generic
+/// `TIMEOUT_LEDGERS` name without context.
+///
+/// **Derivation:** `SECONDS_PER_WEEK (604_800) / SECONDS_PER_LEDGER (5) = 120_960 ledgers ≈ 7 days`
+///
+/// **Source:** policy decided in ADR-001 (`docs/adr/001-dispute-window.md`).
+pub const DEFAULT_TIMEOUT_LEDGERS: u32 = TIMEOUT_LEDGERS;
+
 /// Maximum allowed byte length of a `game_id` string.
 ///
 /// **Source:** policy decided by this repository; mirrors the maximum ledger

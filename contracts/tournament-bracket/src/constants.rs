@@ -17,7 +17,8 @@
 //!   ADR-003 (`docs/adr/003-tournament-bracket.md`)
 
 pub use smile4money_common::constants::{
-    LEDGERS_PER_WEEK, MATCH_TTL_LEDGERS, MAX_GAME_ID_LEN, SECONDS_PER_LEDGER, TIMEOUT_LEDGERS,
+    DEFAULT_TIMEOUT_LEDGERS, LEDGERS_PER_WEEK, MATCH_TTL_LEDGERS, MAX_GAME_ID_LEN,
+    SECONDS_PER_LEDGER, TIMEOUT_LEDGERS,
 };
 
 /// Smallest supported field size.

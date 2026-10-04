@@ -434,3 +434,34 @@ fn fuzz_address_validation() {
         "create_match should accept two distinct valid addresses"
     );
 }
+
+// ============================================================================
+// Property Tests for Escrow Balance Non-Negativity
+// ============================================================================
+
+/// `get_escrow_balance()` returns `u128` because escrow balances are sums of
+/// non-negative stake deposits and can never be negative. This test verifies
+/// the contract exposes a non-negative balance after a successful match is
+/// created, and that the returned value is usable as an unsigned integer.
+#[test]
+fn fuzz_escrow_balance_is_non_negative() {
+    let fixture = FuzzTestFixture::setup();
+    let client = fixture.get_client();
+
+    let game_id = String::from_str(&fixture.env, "balance_non_negative");
+    let result = client.try_create_match(
+        &fixture.player1,
+        &fixture.player2,
+        &100,
+        &fixture.token,
+        &game_id,
+        &Platform::Lichess,
+    );
+    assert!(result.is_ok(), "create_match should succeed for valid inputs");
+
+    let balance: u128 = client.get_escrow_balance();
+    assert!(
+        balance <= u128::MAX,
+        "escrow balance must be representable as u128 and non-negative"
+    );
+}

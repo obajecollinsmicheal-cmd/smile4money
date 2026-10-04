@@ -193,7 +193,12 @@ pub struct Match {
     ///
     /// Must be a positive integer (`> 0`). The total pot held in escrow when
     /// both players have deposited is `stake_amount × 2`.
-    pub stake_amount: i128,
+    ///
+    /// Stored as `u128` because a stake is a quantity of tokens and can never
+    /// be negative. Using an unsigned type makes that invariant explicit in
+    /// the type contract and prevents callers from having to reason about
+    /// (impossible) negative balances.
+    pub stake_amount: u128,
 
     /// The Stellar address of the SEP-41 token contract used for staking.
     ///

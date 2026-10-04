@@ -98,7 +98,7 @@ fn test_e2e_lifecycle_player1_wins() {
     assert!(!m.player1_deposited);
     assert!(!m.player2_deposited);
     assert!(!client.is_funded(&match_id));
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 
     // Balances unchanged after creation
     assert_eq!(token_client.balance(&player1), 1_000);
@@ -112,7 +112,7 @@ fn test_e2e_lifecycle_player1_wins() {
     assert!(m.player1_deposited);
     assert!(!m.player2_deposited);
     assert!(!client.is_funded(&match_id));
-    assert_eq!(client.get_escrow_balance(&match_id), stake);
+    assert_eq!(client.get_escrow_balance(&match_id), stake as u128);
     assert_eq!(token_client.balance(&player1), 1_000 - stake);
     assert_eq!(token_client.balance(&player2), 1_000); // untouched
 
@@ -124,7 +124,7 @@ fn test_e2e_lifecycle_player1_wins() {
     assert!(m.player1_deposited);
     assert!(m.player2_deposited);
     assert!(client.is_funded(&match_id));
-    assert_eq!(client.get_escrow_balance(&match_id), stake * 2);
+    assert_eq!(client.get_escrow_balance(&match_id), (stake * 2) as u128);
     assert_eq!(token_client.balance(&player1), 1_000 - stake);
     assert_eq!(token_client.balance(&player2), 1_000 - stake);
 
@@ -157,7 +157,7 @@ fn test_e2e_lifecycle_player1_wins() {
     assert_eq!(token_client.balance(&player2), 1_000 - stake); // net loss = stake
 
     // Escrow is empty
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 }
 
 // ---------------------------------------------------------------------------
@@ -189,11 +189,11 @@ fn test_e2e_lifecycle_player2_wins() {
     // -- Both players deposit ------------------------------------------------
     client.deposit(&match_id, &player1);
     assert_eq!(client.get_match(&match_id).state, MatchState::Pending);
-    assert_eq!(client.get_escrow_balance(&match_id), stake);
+    assert_eq!(client.get_escrow_balance(&match_id), stake as u128);
 
     client.deposit(&match_id, &player2);
     assert_eq!(client.get_match(&match_id).state, MatchState::Active);
-    assert_eq!(client.get_escrow_balance(&match_id), stake * 2);
+    assert_eq!(client.get_escrow_balance(&match_id), (stake * 2) as u128);
     assert!(client.is_funded(&match_id));
 
     // -- Oracle submits result -- Player 2 wins ------------------------------
@@ -220,7 +220,7 @@ fn test_e2e_lifecycle_player2_wins() {
     // Player 2 receives the full pot; player 1 loses their stake
     assert_eq!(token_client.balance(&player2), 1_000 + stake); // net gain = stake
     assert_eq!(token_client.balance(&player1), 1_000 - stake); // net loss = stake
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,17 +248,17 @@ fn test_e2e_lifecycle_draw() {
     );
 
     assert_eq!(client.get_match(&match_id).state, MatchState::Pending);
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 
     // -- Both players deposit (reversed order to confirm order independence) -
     client.deposit(&match_id, &player2);
     assert_eq!(client.get_match(&match_id).state, MatchState::Pending);
-    assert_eq!(client.get_escrow_balance(&match_id), stake);
+    assert_eq!(client.get_escrow_balance(&match_id), stake as u128);
     assert_eq!(token_client.balance(&player2), 1_000 - stake);
 
     client.deposit(&match_id, &player1);
     assert_eq!(client.get_match(&match_id).state, MatchState::Active);
-    assert_eq!(client.get_escrow_balance(&match_id), stake * 2);
+    assert_eq!(client.get_escrow_balance(&match_id), (stake * 2) as u128);
     assert!(client.is_funded(&match_id));
 
     // -- Oracle submits result -- Draw ----------------------------------------
@@ -285,7 +285,7 @@ fn test_e2e_lifecycle_draw() {
     // Both players are refunded their exact stake -- net change is zero
     assert_eq!(token_client.balance(&player1), 1_000);
     assert_eq!(token_client.balance(&player2), 1_000);
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 }
 
 // ---------------------------------------------------------------------------
@@ -592,16 +592,16 @@ fn test_e2e_escrow_balance_full_lifecycle() {
         &Platform::ChessDotCom,
     );
 
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 
     client.deposit(&match_id, &player1);
-    assert_eq!(client.get_escrow_balance(&match_id), stake);
+    assert_eq!(client.get_escrow_balance(&match_id), stake as u128);
 
     client.deposit(&match_id, &player2);
-    assert_eq!(client.get_escrow_balance(&match_id), stake * 2);
+    assert_eq!(client.get_escrow_balance(&match_id), (stake * 2) as u128);
 
     client.submit_result(&match_id, &game_id, &Winner::Player1, &oracle);
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 }
 
 // ---------------------------------------------------------------------------
@@ -736,7 +736,7 @@ fn test_e2e_override_result_then_finalize_payout_to_player2() {
     client.deposit(&match_id, &player2);
 
     assert_eq!(client.get_match(&match_id).state, MatchState::Active);
-    assert_eq!(client.get_escrow_balance(&match_id), stake * 2);
+    assert_eq!(client.get_escrow_balance(&match_id), (stake * 2) as u128);
 
     // Snapshot balances after both deposits (each player deposited `stake`)
     let p1_after_deposit = token_client.balance(&player1);
@@ -793,7 +793,7 @@ fn test_e2e_override_result_then_finalize_payout_to_player2() {
     );
 
     // Escrow must be empty
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 
     // â”€â”€ Verify completed event carries the overridden winner â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let events = env.events().all();
@@ -855,7 +855,7 @@ fn test_e2e_override_draw_to_player1_wins() {
     // Player1 wins the full pot
     assert_eq!(token_client.balance(&player1), 1_000 + stake); // net gain = stake
     assert_eq!(token_client.balance(&player2), 1_000 - stake); // net loss = stake
-    assert_eq!(client.get_escrow_balance(&match_id), 0);
+    assert_eq!(client.get_escrow_balance(&match_id), 0u128);
 }
 
 /// E2E test: verify that override_result is rejected once the dispute window

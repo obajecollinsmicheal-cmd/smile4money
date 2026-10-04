@@ -1228,7 +1228,14 @@ impl EscrowContract {
     }
 
     /// Return the total escrowed balance for a match (0, 1x, or 2x stake).
-    pub fn get_escrow_balance(env: Env, match_id: u64) -> Result<i128, Error> {
+    ///
+    /// The returned value is always non-negative: it is the product of a
+    /// `u128` deposit count (0, 1, or 2) and `Match::stake_amount`, which is
+    /// validated at match creation to be within `[MIN_STAKE, MAX_STAKE]` and
+    /// therefore strictly positive. Returning `u128` makes this invariant
+    /// explicit in the type contract and removes the need for callers to
+    /// handle a negative case that can never occur.
+    pub fn get_escrow_balance(env: Env, match_id: u64) -> Result<u128, Error> {
         let m: Match = env
             .storage()
             .persistent()
@@ -1237,12 +1244,14 @@ impl EscrowContract {
         if m.state == MatchState::Completed || m.state == MatchState::Cancelled {
             return Ok(0);
         }
-        let deposited: i128 = match (m.player1_deposited, m.player2_deposited) {
+        let deposited: u128 = match (m.player1_deposited, m.player2_deposited) {
             (true, true) => 2,
             (true, false) | (false, true) => 1,
             (false, false) => 0,
         };
-        Ok(deposited * m.stake_amount)
+        // `stake_amount` is validated to be >= MIN_STAKE (> 0) at creation, so
+        // the conversion to `u128` is lossless and the product is non-negative.
+        Ok(deposited * (m.stake_amount as u128))
     }
 
     /// Return a page of match IDs in the range `[start, start + limit)`.

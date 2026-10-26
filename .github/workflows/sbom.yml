@@ -101,25 +101,25 @@ jobs:
           subject-path: release/*
 
       - name: Attest backend SBOM
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@v4
         with:
           subject-path: release/backend-dist.tar.gz
           sbom-path: sbom/backend.cdx.json
 
       - name: Attest frontend SBOM
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@v4
         with:
           subject-path: release/frontend-dist.tar.gz
           sbom-path: sbom/frontend.cdx.json
 
       - name: Attest escrow contract SBOM
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@v4
         with:
           subject-path: release/escrow.wasm
           sbom-path: sbom/smile4money-escrow.cdx.json
 
       - name: Attest oracle contract SBOM
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@v4
         with:
           subject-path: release/oracle.wasm
           sbom-path: sbom/smile4money-oracle.cdx.json

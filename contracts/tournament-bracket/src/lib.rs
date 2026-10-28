@@ -42,9 +42,7 @@ mod types;
 pub use constants::*;
 
 use errors::Error;
-use soroban_sdk::{
-    contract, contractimpl, symbol_short, token, Address, Env, String, Symbol, TryFromVal, Vec,
-};
+use soroban_sdk::{contract, contractimpl, symbol_short, token, Address, Env, String, Symbol, Vec};
 use types::{DataKey, MatchNode, NodeStatus, Tournament, TournamentState};
 
 /// Return `true` if `addr` is the all-zeros Stellar account key.
@@ -52,12 +50,10 @@ use types::{DataKey, MatchNode, NodeStatus, Tournament, TournamentState};
 /// A zero address is the canonical burn address and is never a valid participant.
 fn is_zero_address(env: &Env, addr: &Address) -> bool {
     // The all-zeros Stellar account key encodes to this strkey.
-    // We construct the Address via the ScAddress XDR path since
-    // TryFromVal<Env, String> is not implemented for Address.
-    use soroban_sdk::xdr::{AccountId, PublicKey, ScAddress, Uint256};
-    let zero_key = Uint256([0u8; 32]);
-    let sc_addr = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(zero_key)));
-    let zero_address = Address::try_from_val(env, &sc_addr).expect("invalid zero address");
+    let zero_address = Address::from_string(&String::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    ));
     addr == &zero_address
 }
 
@@ -458,6 +454,7 @@ impl TournamentBracket {
     ///   characters outside `[A-Za-z0-9_-]`.
     /// * [`Error::InvalidNodeStatus`] — the node is not `AwaitingResult`.
     /// * [`Error::WinnerNotInMatch`] — `winner` is not one of the node's entrants.
+    /// * [`Error::TransferFailed`] — the champion transfer failed; the match result and payout are rolled back.
     /// * [`Error::TournamentFinished`] — the tournament is completed or cancelled.
     pub fn submit_match_result(
         env: Env,
@@ -528,12 +525,18 @@ impl TournamentBracket {
         t.champion = Some(winner.clone());
         t.state = TournamentState::Completed;
         t.completed_ledger = Some(env.ledger().sequence());
-        Self::save_tournament(&env, &t);
-
         let payout = t.entry_fee * t.player_count as i128;
         Self::ensure_reserve_for_payout(&env, &t.token, payout)?;
         let client = token::Client::new(&env, &t.token);
-        client.transfer(&env.current_contract_address(), &winner, &payout);
+        client
+            .try_transfer(&env.current_contract_address(), &winner, &payout)
+            .map_err(|_| Error::TransferFailed)?
+            .map_err(|_| Error::TransferFailed)?;
+
+        // Persist the terminal state only after the token transfer succeeds. Any
+        // later storage failure still aborts the Soroban invocation and rolls the
+        // transfer back with the rest of the transaction.
+        Self::save_tournament(&env, &t);
 
         Self::bump_instance_ttl(&env);
         env.events().publish(
@@ -554,6 +557,7 @@ impl TournamentBracket {
     ///
     /// * [`Error::Unauthorized`] — caller is not the admin.
     /// * [`Error::TournamentInProgress`] — at least one match has been decided.
+    /// * [`Error::TransferFailed`] — a refund transfer failed; the cancellation and all earlier refunds are rolled back.
     pub fn cancel_tournament(env: Env, tournament_id: u64) -> Result<(), Error> {
         let admin: Address = env
             .storage()
@@ -596,6 +600,7 @@ impl TournamentBracket {
     /// # Errors
     ///
     /// * [`Error::TimeoutNotReached`] — the window has not elapsed yet.
+    /// * [`Error::TransferFailed`] — a refund transfer failed; cancellation and all earlier refunds are rolled back.
     /// * [`Error::TournamentFinished`] — already completed or cancelled.
     pub fn claim_timeout(env: Env, tournament_id: u64, caller: Address) -> Result<(), Error> {
         caller.require_auth();
@@ -730,13 +735,19 @@ impl TournamentBracket {
             let mut node = Self::load_node(env, t.id, 0, i)?;
             if node.funded1 {
                 if let Some(p) = node.player1.clone() {
-                    client.transfer(&contract, &p, &t.entry_fee);
+                    client
+                        .try_transfer(&contract, &p, &t.entry_fee)
+                        .map_err(|_| Error::TransferFailed)?
+                        .map_err(|_| Error::TransferFailed)?;
                 }
                 node.funded1 = false;
             }
             if node.funded2 {
                 if let Some(p) = node.player2.clone() {
-                    client.transfer(&contract, &p, &t.entry_fee);
+                    client
+                        .try_transfer(&contract, &p, &t.entry_fee)
+                        .map_err(|_| Error::TransferFailed)?
+                        .map_err(|_| Error::TransferFailed)?;
                 }
                 node.funded2 = false;
             }

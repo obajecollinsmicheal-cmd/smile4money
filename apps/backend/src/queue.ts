@@ -27,6 +27,116 @@ import logger from "./logger.js";
 
 let queueStore: PersistentQueueStore | null = null;
 
+/**
+ * Queue monitoring metrics (#2179).
+ *
+ * Tracks queue depth, age of the oldest pending entry, and success rate.
+ * Counters are process-local and reset on restart; the depth/age gauges are
+ * refreshed from the store on every queue operation and by a periodic timer.
+ */
+export interface QueueMetricsSnapshot {
+  /** Number of entries currently pending in the queue. */
+  depth: number;
+  /** Age in milliseconds of the oldest pending entry (0 when empty). */
+  oldestEntryAgeMs: number;
+  /** Successfully processed entries. */
+  processed: number;
+  /** Failed processing attempts. */
+  failed: number;
+  /** processed / (processed + failed); 1 when nothing has been attempted. */
+  successRate: number;
+  /** Timestamp of the last metrics refresh. */
+  updatedAt: number;
+}
+
+const queueMetrics = {
+  depth: 0,
+  oldestEntryAgeMs: 0,
+  processed: 0,
+  failed: 0,
+  updatedAt: Date.now(),
+};
+
+function computeSuccessRate(): number {
+  const total = queueMetrics.processed + queueMetrics.failed;
+  return total === 0 ? 1 : queueMetrics.processed / total;
+}
+
+/** Record that an entry was added to the queue. */
+export function recordQueueEnqueue(): void {
+  queueMetrics.updatedAt = Date.now();
+}
+
+/** Record that an entry was successfully processed and removed. */
+export function recordQueueProcessed(): void {
+  queueMetrics.processed += 1;
+  queueMetrics.updatedAt = Date.now();
+}
+
+/** Record that processing an entry failed. */
+export function recordQueueFailed(): void {
+  queueMetrics.failed += 1;
+  queueMetrics.updatedAt = Date.now();
+}
+
+/**
+ * Recompute the depth and oldest-entry-age gauges from the store.
+ * Safe to call when the store is not initialised (leaves gauges untouched).
+ */
+export async function refreshQueueMetrics(): Promise<void> {
+  if (!queueStore) return;
+  try {
+    const entries = await queueStore.getAll();
+    const now = Date.now();
+    queueMetrics.depth = entries.length;
+    queueMetrics.oldestEntryAgeMs =
+      entries.length === 0
+        ? 0
+        : now - Math.min(...entries.map((entry) => entry.createdAt));
+    queueMetrics.updatedAt = now;
+  } catch (err) {
+    logger.error({ err: String(err) }, "oracle_queue: metrics refresh failed");
+  }
+}
+
+/** Return a snapshot of the current queue metrics. */
+export function getQueueMetrics(): QueueMetricsSnapshot {
+  return {
+    depth: queueMetrics.depth,
+    oldestEntryAgeMs: queueMetrics.oldestEntryAgeMs,
+    processed: queueMetrics.processed,
+    failed: queueMetrics.failed,
+    successRate: computeSuccessRate(),
+    updatedAt: queueMetrics.updatedAt,
+  };
+}
+
+/** Reset all queue metrics (used by tests). */
+export function resetQueueMetrics(): void {
+  queueMetrics.depth = 0;
+  queueMetrics.oldestEntryAgeMs = 0;
+  queueMetrics.processed = 0;
+  queueMetrics.failed = 0;
+  queueMetrics.updatedAt = Date.now();
+}
+
+const DEFAULT_QUEUE_METRICS_INTERVAL_MS = 15_000;
+
+/**
+ * Start a periodic timer that refreshes the queue gauges so depth and
+ * oldest-entry age stay current even when the queue is idle.
+ * Returns a cleanup function that stops the timer.
+ */
+export function startQueueMetricsTask(
+  intervalMs = DEFAULT_QUEUE_METRICS_INTERVAL_MS,
+): () => void {
+  const timer = setInterval(() => {
+    void refreshQueueMetrics();
+  }, intervalMs);
+  if (typeof timer.unref === "function") timer.unref();
+  return () => clearInterval(timer);
+}
+
 export type QueueStoreType = "memory" | "sqlite";
 
 /**
@@ -108,6 +218,8 @@ export async function initializeQueue(): Promise<void> {
   }
 
   logger.info({ store: resolved }, "oracle_dlq: queue store initialized");
+
+  await refreshQueueMetrics();
 }
 
 /**
@@ -140,6 +252,7 @@ export async function writeToDlq(
 
   await getQueueStore().add(entry);
   logger.warn({ dlqId: id, failureReason }, "oracle_dlq: entry written");
+  recordQueueEnqueue();
   await emitDlqDepth();
   return entry;
 }
@@ -152,6 +265,7 @@ export async function listDlqEntries(): Promise<DlqEntry[]> {
 /** Remove a successfully processed entry. */
 export async function removeDlqEntry(id: string): Promise<void> {
   await getQueueStore().remove(id);
+  recordQueueProcessed();
   await emitDlqDepth();
 }
 
@@ -163,10 +277,11 @@ export async function updateDlqEntry(
   await getQueueStore().update(id, updates);
 }
 
-/** Emit the oracle_dlq_depth metric. */
+/** Emit the oracle_dlq_depth metric and refresh queue gauges. */
 async function emitDlqDepth(): Promise<void> {
   const depth = await getQueueStore().count();
   logger.info({ metric: "oracle_dlq_depth", value: depth }, "oracle_dlq_depth");
+  await refreshQueueMetrics();
 }
 
 export type RetryHandler = (entry: DlqEntry) => Promise<void>;
@@ -233,6 +348,7 @@ export function startRetryWorker(
           breaker.recordSuccess();
           logger.info({ dlqId: entry.id }, "oracle_dlq: entry resolved");
         } catch (err) {
+          recordQueueFailed();
           const isRpcError =
             String(err).includes("RPC") || String(err).includes("Network");
 

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { InMemoryQueueStore } from "../src/store/in-memory-queue-store.js";
 import { SQLiteQueueStore } from "../src/store/sqlite-queue-store.js";
 import type { DlqEntry } from "../src/store/persistent-queue-store.js";
@@ -248,6 +248,94 @@ testQueueStore(() => {
   };
 
   return store;
+});
+
+describe("Queue replay endpoint", () => {
+  let store: InMemoryQueueStore;
+  let reprocess: ReturnType<typeof vi.fn>;
+  let logger: { info: ReturnType<typeof vi.fn>; error: ReturnType<typeof vi.fn> };
+  let app: any;
+
+  const createEntry = (
+    id: string,
+    overrides: Partial<DlqEntry> = {},
+  ): DlqEntry => ({
+    id,
+    payload: { matchId: 1 },
+    failureReason: "test error",
+    attempts: 1,
+    createdAt: Date.now(),
+    lastAttemptAt: null,
+    ...overrides,
+  });
+
+  beforeEach(async () => {
+    store = new InMemoryQueueStore();
+    await store.initialize();
+    reprocess = vi.fn().mockResolvedValue(undefined);
+    logger = { info: vi.fn(), error: vi.fn() };
+    app = createQueueReplayApp({ store, reprocess, logger });
+  });
+
+  afterEach(async () => {
+    await store.close();
+  });
+
+  it("returns 200 and reprocesses a failed entry as new", async () => {
+    await store.add(createEntry("e1", { attempts: 3 }));
+
+    const res = await request(app).post("/queue/e1/replay");
+
+    expect(res.status).toBe(200);
+    expect(reprocess).toHaveBeenCalledTimes(1);
+    expect(reprocess).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "e1", payload: { matchId: 1 } }),
+    );
+
+    const [entry] = await store.getAll();
+    expect(entry.attempts).toBe(0);
+    expect(entry.lastAttemptAt).toBeNull();
+  });
+
+  it("returns 404 for unknown entry IDs", async () => {
+    const res = await request(app).post("/queue/missing/replay");
+
+    expect(res.status).toBe(404);
+    expect(reprocess).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 for non-failed entries", async () => {
+    await store.add(createEntry("e1", { attempts: 0, failureReason: null }));
+
+    const res = await request(app).post("/queue/e1/replay");
+
+    expect(res.status).toBe(409);
+    expect(reprocess).not.toHaveBeenCalled();
+  });
+
+  it("tracks the replay result", async () => {
+    await store.add(createEntry("e1"));
+
+    const res = await request(app).post("/queue/e1/replay");
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      id: "e1",
+      status: "replayed",
+    });
+    expect(res.body.replayedAt).toEqual(expect.any(Number));
+  });
+
+  it("logs the replay", async () => {
+    await store.add(createEntry("e1"));
+
+    await request(app).post("/queue/e1/replay");
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining("replay"),
+      expect.objectContaining({ entryId: "e1" }),
+    );
+  });
 });
 
 describe("SQLite WAL mode", () => {

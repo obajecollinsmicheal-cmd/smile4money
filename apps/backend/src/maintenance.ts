@@ -14,6 +14,7 @@ import { getMaintainableQueueStore } from './queue.js';
 import { performLiveRestore, defaultRestoreRequestPath } from './store/live-restore.js';
 import type { DlqEntry } from './store/persistent-queue-store.js';
 import { startStorageCapacityMonitor, type CapacityLogger } from './store/storage-capacity.js';
+import { startQueueStallDetector, type QueueStallDetectorOptions } from './store/queue-stall.js';
 
 export interface MaintenanceOptions {
   logger: CapacityLogger;
@@ -21,6 +22,8 @@ export interface MaintenanceOptions {
   isSettled?: (entry: DlqEntry) => Promise<boolean>;
   /** Signal that triggers a restore. Default SIGUSR2. */
   signal?: NodeJS.Signals;
+  /** Queue stall detection tuning. Defaults come from config/env.ts. */
+  stall?: Partial<QueueStallDetectorOptions>;
 }
 
 /** All SQLite databases in the queue database's directory. */
@@ -81,6 +84,11 @@ export function installMaintenance(options: MaintenanceOptions): () => void {
     ? startStorageCapacityMonitor(listDatabases(path.dirname(databasePath)), options.logger)
     : () => {};
 
+  const stopStallDetector = startQueueStallDetector({
+    logger: options.logger,
+    ...options.stall,
+  });
+
   const signal = options.signal ?? 'SIGUSR2';
   let running = false;
   const onSignal = () => {
@@ -97,6 +105,7 @@ export function installMaintenance(options: MaintenanceOptions): () => void {
 
   return () => {
     stopMonitor();
+    stopStallDetector();
     process.off(signal, onSignal);
   };
 }

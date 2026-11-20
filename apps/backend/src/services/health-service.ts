@@ -9,6 +9,7 @@
 import { checkStellarRpc } from './stellar.js';
 import { getAllLimiterStats } from './bottleneck-limiters.js';
 import { getSettlementAgeMonitor, type SettlementSnapshot } from './settlement-age-monitor.js';
+import { getQueueMetrics, type QueueMetricsSnapshot } from './queue-metrics.js';
 
 export interface HealthCheckOptions {
   /** When true, performs a live connectivity check against the Stellar RPC. */
@@ -17,6 +18,8 @@ export interface HealthCheckOptions {
   includeLimiters?: boolean;
   /** When true, appends settlement age percentiles and active alerts to the response payload. */
   includeSettlement?: boolean;
+  /** When true, appends queue monitoring metrics to the response payload. */
+  includeQueue?: boolean;
   /** Uptime in seconds (passed in from the route so the timer origin is preserved). */
   uptimeSeconds: number;
   /** Application version string. */
@@ -32,6 +35,7 @@ export interface HealthOk {
     dependencies?: { stellar_rpc: 'ok' };
     limiters?: ReturnType<typeof getAllLimiterStats>;
     settlement?: SettlementSnapshot | null;
+    queue?: QueueMetricsSnapshot | null;
   };
 }
 
@@ -59,7 +63,8 @@ export type HealthCheckResult = HealthOk | HealthError;
  * limiter statistics (queued / executing counts).
  */
 export async function runHealthCheck(options: HealthCheckOptions): Promise<HealthCheckResult> {
-  const { deepCheck, includeLimiters, includeSettlement, uptimeSeconds, version } = options;
+  const { deepCheck, includeLimiters, includeSettlement, includeQueue, uptimeSeconds, version } =
+    options;
 
   if (deepCheck) {
     try {
@@ -94,6 +99,10 @@ export async function runHealthCheck(options: HealthCheckOptions): Promise<Healt
 
   if (includeSettlement) {
     payload.settlement = getSettlementAgeMonitor()?.getSnapshot() ?? null;
+  }
+
+  if (includeQueue) {
+    payload.queue = getQueueMetrics()?.getSnapshot() ?? null;
   }
 
   return { ok: true, payload };

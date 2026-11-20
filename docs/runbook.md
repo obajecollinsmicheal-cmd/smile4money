@@ -334,6 +334,97 @@ See [§5 Unpausing the Contract](#5-unpausing-the-contract) for the unpause comm
 
 ---
 
+## 3a. Queue Monitoring, Replay and Stall Detection
+
+The backend queue (oracle polling jobs and result submissions) exposes metrics, a manual replay
+endpoint for failed entries, and automatic stall detection. Use this section when a queue alert
+fires or when you need to recover a failed entry.
+
+### 3a.1 Queue metrics
+
+Metrics are exposed on the backend's Prometheus endpoint (`GET /metrics`, default port from
+`METRICS_PORT`) and are updated continuously as the queue is processed:
+
+| Metric | Meaning | Typical use |
+|---|---|---|
+| `queue_depth` | Number of entries currently waiting to be processed | Rising depth = backlog building |
+| `queue_oldest_entry_age_seconds` | Age of the oldest entry still in the queue | Directly measures how stale the backlog is |
+| `queue_success_rate` | Ratio of successful to total processing attempts over the rolling window | Falling rate = processing is failing |
+
+Quick checks:
+
+```bash
+# Scrape the queue metrics from the running backend
+curl -s "http://localhost:${METRICS_PORT:-9464}/metrics" | grep '^queue_'
+```
+
+Alert thresholds (align with the G3 gate in [§8.1](#81-gates)):
+
+- `queue_depth` > 0 sustained for 1 h → page the oracle service owner.
+- `queue_oldest_entry_age_seconds` > 24 h → treat as a G3 breach; escalate.
+- `queue_success_rate` dropping below 0.95 over 1 h → investigate provider/RPC errors.
+
+### 3a.2 Replaying a failed queue entry
+
+Failed entries are retained in the DLQ with their entry ID (see `oracle_dlq:` log lines and the
+`oracle_dlq_depth` metric). To reprocess one manually:
+
+```bash
+curl -s -X POST "http://localhost:${BACKEND_PORT:-3000}/queue/${ENTRY_ID}/replay" \
+  -H "Authorization: Bearer ${ADMIN_TOKEN}"
+```
+
+Expected responses:
+
+| Status | Body | Meaning |
+|---|---|---|
+| `200` | `{"status":"replayed","entryId":"<id>"}` | Entry re-enqueued and reprocessed as if new |
+| `404` | `{"error":"not_found"}` | No failed entry with that ID (already replayed or evicted) |
+| `409` | `{"error":"not_failed"}` | Entry is not in a failed state; nothing to replay |
+| `401`/`403` | `{"error":"unauthorized"}` | Missing or invalid admin credentials |
+
+Behaviour and audit trail:
+
+- The entry is reprocessed **as if new**: it goes through the normal fetch → validate → submit
+  path, so a successful replay produces a fresh `submit_result` attempt.
+- The replay result (success or failure) is tracked on the entry and reflected in
+  `queue_success_rate`.
+- Every replay is logged with the entry ID, operator identity and outcome. Confirm it with:
+
+```bash
+journalctl -u smile4money-backend -f | grep 'queue_replay'
+```
+
+Record the entry ID, timestamp and outcome in the incident log.
+
+### 3a.3 Stall detection
+
+The backend tracks queue progress per interval and compares consecutive intervals. If an interval
+makes no progress (no entries processed) while entries are waiting, the queue is considered
+stalled and an alert is sent.
+
+Relevant environment variables:
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `QUEUE_STALL_INTERVAL_MS` | `60000` | Length of each progress-tracking interval |
+| `QUEUE_STALL_THRESHOLD` | `3` | Consecutive no-progress intervals before a stall alert fires |
+
+When a stall is detected:
+
+- An alert is sent through the configured alert channel (same path as the G3 alerts).
+- A `queue_stall` log event is emitted with the interval count, queue depth and oldest entry age:
+
+```bash
+journalctl -u smile4money-backend -f | grep 'queue_stall'
+```
+
+First response: check `queue_depth` and `queue_oldest_entry_age_seconds` (§3a.1), inspect the
+oracle `/health` endpoint, and replay any stuck failed entries (§3a.2). If processing cannot be
+restored, follow the G3 rollback triggers in [§8.3](#83-rollback-authority).
+
+---
+
 ## 4. Emergency Fund Drain
 
 **When to use:** Active exploit with no time for match-by-match resolution. Transfers the

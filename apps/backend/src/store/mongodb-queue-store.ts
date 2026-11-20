@@ -15,6 +15,10 @@ interface DlqDocument extends mongoose.Document {
   createdAt: number;
   lastAttemptAt: number | null;
   traceContext?: DlqEntry['traceContext'];
+  // Replay metadata (#2184): when the entry was last manually replayed and the
+  // outcome of that replay attempt.
+  replayedAt?: number | null;
+  replayResult?: DlqEntry['replayResult'];
   expireAt: Date;
 }
 
@@ -28,6 +32,9 @@ const dlqSchema = new mongoose.Schema<DlqDocument>(
     lastAttemptAt: { type: Number, required: false, default: null },
     // W3C trace context the entry was queued under (#123).
     traceContext: { type: mongoose.Schema.Types.Mixed, required: false },
+    // Replay metadata (#2184).
+    replayedAt: { type: Number, required: false, default: null },
+    replayResult: { type: mongoose.Schema.Types.Mixed, required: false },
     // TTL index: auto-delete entries older than 30 days
     expireAt: {
       type: Date,
@@ -68,6 +75,10 @@ export class MongoDBQueueStore implements PersistentQueueStore {
       createdAt: doc.createdAt,
       lastAttemptAt: doc.lastAttemptAt,
       ...(doc.traceContext ? { traceContext: doc.traceContext } : {}),
+      ...(doc.replayedAt != null ? { replayedAt: doc.replayedAt } : {}),
+      ...(doc.replayResult !== undefined && doc.replayResult !== null
+        ? { replayResult: doc.replayResult }
+        : {}),
     }));
   }
 
@@ -76,7 +87,18 @@ export class MongoDBQueueStore implements PersistentQueueStore {
   }
 
   async update(id: string, updates: Partial<DlqEntry>): Promise<void> {
-    await DlqModel.updateOne({ id }, { $set: updates });
+    // Strip undefined values so replay metadata can be set/cleared explicitly
+    // without wiping unrelated fields (#2184).
+    const $set: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        $set[key] = value;
+      }
+    }
+    if (Object.keys($set).length === 0) {
+      return;
+    }
+    await DlqModel.updateOne({ id }, { $set });
   }
 
   async count(): Promise<number> {

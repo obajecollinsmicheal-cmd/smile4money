@@ -211,7 +211,26 @@ CI suite before merging.
 
 ## 8. Observability
 
-No monitoring or alerting is currently configured. This is acceptable for testnet but must be addressed before mainnet launch.
+Contract event indexing and Oracle health monitoring are not yet configured. This is acceptable for testnet but must be addressed before mainnet launch. Queue monitoring and stall detection are described below.
+
+### Queue monitoring metrics
+
+The queue worker exposes the following metrics for monitoring:
+
+| Metric | Description |
+|--------|-------------|
+| Queue depth | Number of entries currently waiting in the queue |
+| Oldest entry age | Age of the oldest entry still in the queue |
+| Success rate | Ratio of successfully processed entries to total processed entries |
+
+Metrics are refreshed continuously on a fixed interval so that dashboards and alerts always reflect near-current queue state.
+
+### Queue stall detection
+
+Progress is tracked per interval (entries processed in each interval). Stall detection compares consecutive intervals: if an interval shows no progress relative to the previous interval, the queue is considered stalled. On stall:
+
+- An alert is sent to the on-call channel.
+- The stall is logged with the interval details for later diagnosis.
 
 ### Planned work (pre-mainnet)
 

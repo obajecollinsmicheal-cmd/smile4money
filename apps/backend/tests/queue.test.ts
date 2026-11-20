@@ -10,6 +10,9 @@ import {
   resolveQueueStoreType,
   parseDlqTtlDays,
   evictExpiredDlqEntries,
+  replayDlqEntry,
+  getQueueMetrics,
+  startStallDetector,
   type DlqEntry,
 } from "../src/queue.js";
 import { resetCircuitBreaker } from "../src/services/circuit-breaker.js";
@@ -345,6 +348,280 @@ describe('Persistent Queue System', () => {
       await removeDlqEntry(entry.id);
       const entries = await listDlqEntries();
       expect(entries).toHaveLength(0);
+    });
+  });
+
+  describe('Queue monitoring metrics (#2179)', () => {
+    it('reports queue depth reflecting the number of entries', async () => {
+      expect((await getQueueMetrics()).depth).toBe(0);
+
+      await writeToDlq({ matchId: 1 }, 'err1');
+      await writeToDlq({ matchId: 2 }, 'err2');
+      await writeToDlq({ matchId: 3 }, 'err3');
+
+      expect((await getQueueMetrics()).depth).toBe(3);
+
+      const [first] = await listDlqEntries();
+      await removeDlqEntry(first.id);
+
+      expect((await getQueueMetrics()).depth).toBe(2);
+    });
+
+    it('reports the age of the oldest entry', async () => {
+      const DAY_MS = 24 * 60 * 60 * 1000;
+      const oldEntry = await writeToDlq({ matchId: 1 }, 'old');
+      await writeToDlq({ matchId: 2 }, 'new');
+
+      await updateDlqEntry(oldEntry.id, { createdAt: Date.now() - 2 * DAY_MS });
+
+      const metrics = await getQueueMetrics();
+      expect(metrics.oldestEntryAgeMs).toBeGreaterThanOrEqual(2 * DAY_MS);
+    });
+
+    it('reports zero oldest entry age when the queue is empty', async () => {
+      const metrics = await getQueueMetrics();
+      expect(metrics.depth).toBe(0);
+      expect(metrics.oldestEntryAgeMs).toBe(0);
+    });
+
+    it('tracks success rate after successful and failed retries', async () => {
+      await writeToDlq({ matchId: 1 }, 'err1');
+      await writeToDlq({ matchId: 2 }, 'err2');
+
+      let callCount = 0;
+      const handler = vi.fn().mockImplementation(async () => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error('first fails');
+        }
+      });
+
+      const stop = startRetryWorker(handler, 1000);
+
+      try {
+        await vi.advanceTimersByTimeAsync(1000);
+
+        const metrics = await getQueueMetrics();
+        // One success, one failure => 50% success rate
+        expect(metrics.successRate).toBeCloseTo(0.5, 5);
+      } finally {
+        stop();
+      }
+    });
+
+    it('reports a success rate of 1 when all retries succeed', async () => {
+      await writeToDlq({ matchId: 1 }, 'err1');
+      await writeToDlq({ matchId: 2 }, 'err2');
+
+      const handler = vi.fn().mockResolvedValue(undefined);
+      const stop = startRetryWorker(handler, 1000);
+
+      try {
+        await vi.advanceTimersByTimeAsync(1000);
+        const metrics = await getQueueMetrics();
+        expect(metrics.successRate).toBe(1);
+      } finally {
+        stop();
+      }
+    });
+
+    it('reports a success rate of 0 when all retries fail', async () => {
+      await writeToDlq({ matchId: 1 }, 'err1');
+
+      const handler = vi.fn().mockRejectedValue(new Error('always fails'));
+      const stop = startRetryWorker(handler, 1000);
+
+      try {
+        await vi.advanceTimersByTimeAsync(1000);
+        const metrics = await getQueueMetrics();
+        expect(metrics.successRate).toBe(0);
+      } finally {
+        stop();
+      }
+    });
+
+    it('updates metrics continuously as the queue changes', async () => {
+      const first = await getQueueMetrics();
+      expect(first.depth).toBe(0);
+
+      await writeToDlq({ matchId: 1 }, 'err1');
+      const second = await getQueueMetrics();
+      expect(second.depth).toBe(1);
+
+      await writeToDlq({ matchId: 2 }, 'err2');
+      const third = await getQueueMetrics();
+      expect(third.depth).toBe(2);
+
+      const [entry] = await listDlqEntries();
+      await removeDlqEntry(entry.id);
+      const fourth = await getQueueMetrics();
+      expect(fourth.depth).toBe(1);
+    });
+  });
+
+  describe('Queue replay mechanism (#2184)', () => {
+    it('replays a failed entry and reprocesses it as new', async () => {
+      const entry = await writeToDlq({ matchId: 1 }, 'initial failure');
+      await updateDlqEntry(entry.id, { attempts: 3, lastAttemptAt: Date.now() });
+
+      const handler = vi.fn().mockResolvedValue(undefined);
+      const result = await replayDlqEntry(entry.id, handler);
+
+      expect(result.success).toBe(true);
+      expect(handler).toHaveBeenCalledTimes(1);
+      expect(handler).toHaveBeenCalledWith(
+        expect.objectContaining({ id: entry.id, payload: { matchId: 1 } })
+      );
+
+      // Entry reprocessed successfully => removed from queue
+      expect(await listDlqEntries()).toHaveLength(0);
+    });
+
+    it('tracks the replay result when the replay fails', async () => {
+      const entry = await writeToDlq({ matchId: 1 }, 'initial failure');
+
+      const handler = vi.fn().mockRejectedValue(new Error('replay failed'));
+      const result = await replayDlqEntry(entry.id, handler);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toBeDefined();
+
+      // Entry remains in the queue after a failed replay
+      const entries = await listDlqEntries();
+      expect(entries).toHaveLength(1);
+      expect(entries[0].id).toBe(entry.id);
+    });
+
+    it('records replay metadata on the entry', async () => {
+      const entry = await writeToDlq({ matchId: 1 }, 'initial failure');
+
+      const handler = vi.fn().mockRejectedValue(new Error('replay failed'));
+      await replayDlqEntry(entry.id, handler);
+
+      const [updated] = await listDlqEntries();
+      expect(updated.lastReplayAt).toBeGreaterThan(0);
+      expect(updated.replayCount).toBe(1);
+    });
+
+    it('returns not-found when the entry does not exist', async () => {
+      const handler = vi.fn().mockResolvedValue(undefined);
+      const result = await replayDlqEntry('nonexistent-id', handler);
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('not_found');
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('rejects replay of entries that are not in a failed state', async () => {
+      const entry = await writeToDlq({ matchId: 1 }, 'initial failure');
+      // A freshly written entry has not failed a retry yet (attempts === 0)
+      const handler = vi.fn().mockResolvedValue(undefined);
+      const result = await replayDlqEntry(entry.id, handler);
+
+      expect(result.success).toBe(false);
+      expect(result.reason).toBe('not_failed');
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('logs the replay attempt', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const entry = await writeToDlq({ matchId: 1 }, 'initial failure');
+      await updateDlqEntry(entry.id, { attempts: 1 });
+
+      const handler = vi.fn().mockResolvedValue(undefined);
+      await replayDlqEntry(entry.id, handler);
+
+      const logged = logSpy.mock.calls.some((call) =>
+        call.some((arg) => typeof arg === 'string' && arg.toLowerCase().includes('replay'))
+      );
+      expect(logged).toBe(true);
+
+      logSpy.mockRestore();
+    });
+  });
+
+  describe('Queue stall detection (#2187)', () => {
+    it('logs a stall alert when the queue makes no progress across intervals', async () => {
+      const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      // Stuck entries that never get processed (no worker running)
+      await writeToDlq({ matchId: 1 }, 'stuck');
+      await writeToDlq({ matchId: 2 }, 'stuck');
+
+      const onStall = vi.fn();
+      const stop = startStallDetector({ intervalMs: 1000, onStall });
+
+      try {
+        // First interval establishes a baseline
+        await vi.advanceTimersByTimeAsync(1000);
+        // Second interval: no progress => stall detected
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(onStall).toHaveBeenCalled();
+
+        const stallLogged = [...logSpy.mock.calls, ...warnSpy.mock.calls].some((call) =>
+          call.some((arg) => typeof arg === 'string' && arg.toLowerCase().includes('stall'))
+        );
+        expect(stallLogged).toBe(true);
+      } finally {
+        stop();
+        logSpy.mockRestore();
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('does not alert when the queue is making progress', async () => {
+      const onStall = vi.fn();
+      const stop = startStallDetector({ intervalMs: 1000, onStall });
+
+      try {
+        // Progress: entries are added and removed between intervals
+        await writeToDlq({ matchId: 1 }, 'err');
+        await vi.advanceTimersByTimeAsync(1000);
+
+        const [entry] = await listDlqEntries();
+        await removeDlqEntry(entry.id);
+        await vi.advanceTimersByTimeAsync(1000);
+
+        await writeToDlq({ matchId: 2 }, 'err');
+        await vi.advanceTimersByTimeAsync(1000);
+
+        expect(onStall).not.toHaveBeenCalled();
+      } finally {
+        stop();
+      }
+    });
+
+    it('compares progress between consecutive intervals', async () => {
+      const onStall = vi.fn();
+      const stop = startStallDetector({ intervalMs: 1000, onStall });
+
+      try {
+        // Interval 1: progress (entry added)
+        await writeToDlq({ matchId: 1 }, 'err');
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(onStall).not.toHaveBeenCalled();
+
+        // Interval 2: no progress => stall
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(onStall).toHaveBeenCalledTimes(1);
+      } finally {
+        stop();
+      }
+    });
+
+    it('stops detecting stalls after cleanup', async () => {
+      const onStall = vi.fn();
+      const stop = startStallDetector({ intervalMs: 1000, onStall });
+
+      await writeToDlq({ matchId: 1 }, 'stuck');
+      await vi.advanceTimersByTimeAsync(1000);
+
+      stop();
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(onStall).not.toHaveBeenCalled();
     });
   });
 

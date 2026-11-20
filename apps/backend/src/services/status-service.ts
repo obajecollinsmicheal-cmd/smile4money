@@ -41,11 +41,22 @@ export interface Incident {
   updates: IncidentUpdate[];
 }
 
+export interface QueueMetrics {
+  /** Entries currently waiting in the queue. */
+  depth: number;
+  /** Age in milliseconds of the oldest waiting entry, or null when empty. */
+  oldestAgeMs: number | null;
+  /** Fraction (0..1) of processed entries that succeeded, or null when unknown. */
+  successRate: number | null;
+}
+
 export interface StatusSignals {
   /** State of the RPC circuit breaker, or null when unknown. */
   rpcCircuit: CircuitState | null;
   /** Results waiting in the retry queue, or null when it can't be read. */
   pendingSubmissions: number | null;
+  /** Queue monitoring metrics, or null when they can't be read. */
+  queueMetrics?: QueueMetrics | null;
   incidents: Incident[];
   now: Date;
 }
@@ -63,6 +74,7 @@ export interface PublicStatus {
   components: PublicComponent[];
   activeIncidents: Incident[];
   recentIncidents: Incident[];
+  queueMetrics: QueueMetrics | null;
 }
 
 /** Results waiting longer than this count makes submission "degraded". */
@@ -199,5 +211,6 @@ export function buildStatus(signals: StatusSignals): PublicStatus {
     components,
     activeIncidents: active,
     recentIncidents: recent,
+    queueMetrics: signals.queueMetrics ?? null,
   };
 }

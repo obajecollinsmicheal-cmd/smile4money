@@ -6,8 +6,10 @@ import validateGameRouter from './routes/validate-game.js';
 import reviewRouter from './routes/oracle-review.js';
 import oracleRouter from './routes/oracle.js';
 import playerIdentityRouter from './routes/player-identity.js';
-import { errorToHttpStatus } from './errors/errorToHttpStatus.js';
+import { errorToHttpStatus, errorCodeFromStatus } from './errors/errorToHttpStatus.js';
+import { errorEnvelope } from './errors/errorEnvelope.js';
 import { requestLogging } from './middleware/request-logging.js';
+import queueReplayRouter from './routes/queue-replay.js';
 
 /**
  * Parse the ALLOWED_ORIGINS environment variable into an array of origin strings.
@@ -54,6 +56,8 @@ app.use('/api/validate-game', validateGameRouter);
 app.use('/api/oracle/reviews', reviewRouter);
 app.use('/api/oracle', oracleRouter);
 app.use('/api/player-identity', playerIdentityRouter);
+// #2184 — manual replay of failed queue entries (POST /queue/:id/replay).
+app.use('/queue', queueReplayRouter);
 
 // Fallback for any error a route handler doesn't catch itself, so every
 // route ends up with the same JSON error shape and the same centralized
@@ -61,7 +65,9 @@ app.use('/api/player-identity', playerIdentityRouter);
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const status = errorToHttpStatus(err);
   const message = err instanceof Error ? err.message : 'Unknown error';
-  res.status(status).json({ error: message });
+  // #2177 — every error response carries a code, message, actionable
+  // suggestion and a link to the relevant documentation.
+  res.status(status).json(errorEnvelope(errorCodeFromStatus(status), message));
 });
 
 // Public service status (#115). Mounted here, after the other routes, so the

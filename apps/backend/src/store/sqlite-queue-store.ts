@@ -163,6 +163,8 @@ export class SQLiteQueueStore implements PersistentQueueStore {
           attempts INTEGER NOT NULL DEFAULT 0,
           createdAt INTEGER NOT NULL,
           lastAttemptAt INTEGER,
+          replayedAt INTEGER,
+          replayResult TEXT,
           expireAt INTEGER NOT NULL,
           CONSTRAINT expireAt_check CHECK (expireAt > 0)
         )
@@ -178,7 +180,41 @@ export class SQLiteQueueStore implements PersistentQueueStore {
       ),
     );
 
+    // Migrate pre-existing tables that lack the replay metadata columns.
+    await this.ensureReplayColumns();
+
     this.initialized = true;
+  }
+
+  /**
+   * Adds the replay metadata columns to an existing table if they are missing.
+   * `CREATE TABLE IF NOT EXISTS` does not alter tables created by older versions.
+   */
+  private async ensureReplayColumns(): Promise<void> {
+    const columns = await withRetry<any[]>("initialize:tableInfo", (cb) =>
+      this.getDb().all(
+        `PRAGMA table_info(oracle_dlq)`,
+        (err: Error | null, result: any[]) => cb(err, result),
+      ),
+    );
+    const existing = new Set((columns || []).map((col) => col.name));
+
+    if (!existing.has("replayedAt")) {
+      await withRetry<void>("initialize:addReplayedAt", (cb) =>
+        this.getDb().run(
+          `ALTER TABLE oracle_dlq ADD COLUMN replayedAt INTEGER`,
+          (err: Error | null) => cb(err),
+        ),
+      );
+    }
+    if (!existing.has("replayResult")) {
+      await withRetry<void>("initialize:addReplayResult", (cb) =>
+        this.getDb().run(
+          `ALTER TABLE oracle_dlq ADD COLUMN replayResult TEXT`,
+          (err: Error | null) => cb(err),
+        ),
+      );
+    }
   }
 
   async add(entry: DlqEntry): Promise<void> {
@@ -186,8 +222,8 @@ export class SQLiteQueueStore implements PersistentQueueStore {
     await withRetry<void>("add", (cb) =>
       this.getDb().run(
         `
-        INSERT INTO oracle_dlq (id, payload, failureReason, attempts, createdAt, lastAttemptAt, expireAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO oracle_dlq (id, payload, failureReason, attempts, createdAt, lastAttemptAt, replayedAt, replayResult, expireAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           entry.id,
@@ -196,6 +232,8 @@ export class SQLiteQueueStore implements PersistentQueueStore {
           entry.attempts,
           entry.createdAt,
           entry.lastAttemptAt,
+          entry.replayedAt ?? null,
+          entry.replayResult ?? null,
           expireAt,
         ],
         (err: Error | null) => cb(err),
@@ -227,6 +265,8 @@ export class SQLiteQueueStore implements PersistentQueueStore {
       attempts: row.attempts,
       createdAt: row.createdAt,
       lastAttemptAt: row.lastAttemptAt || null,
+      replayedAt: row.replayedAt ?? undefined,
+      replayResult: row.replayResult ?? undefined,
     }));
   }
 
@@ -251,6 +291,14 @@ export class SQLiteQueueStore implements PersistentQueueStore {
     if (updates.lastAttemptAt !== undefined) {
       setClauses.push("lastAttemptAt = ?");
       values.push(updates.lastAttemptAt);
+    }
+    if (updates.replayedAt !== undefined) {
+      setClauses.push("replayedAt = ?");
+      values.push(updates.replayedAt);
+    }
+    if (updates.replayResult !== undefined) {
+      setClauses.push("replayResult = ?");
+      values.push(updates.replayResult);
     }
 
     if (setClauses.length === 0) {

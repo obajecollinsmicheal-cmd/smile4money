@@ -83,6 +83,12 @@ export class MongoDBQueueStore implements PersistentQueueStore {
     return await DlqModel.countDocuments({});
   }
 
+  async deleteExpired(olderThanMs: number): Promise<number> {
+    const cutoff = Date.now() - olderThanMs;
+    const result = await DlqModel.deleteMany({ createdAt: { $lt: cutoff } });
+    return result.deletedCount ?? 0;
+  }
+
   async clear(): Promise<void> {
     await DlqModel.deleteMany({});
   }

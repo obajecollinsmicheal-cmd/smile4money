@@ -6,6 +6,28 @@ export interface SqliteMigration {
   statements: string[];
 }
 
+/** Durable dead-letter queue storage. Entries are persisted to disk so they
+ * survive process restarts; the created_at index supports TTL eviction. */
+export const createDlqEntriesMigration: SqliteMigration = {
+  version: 1,
+  name: 'create_dlq_entries',
+  statements: [
+    `CREATE TABLE IF NOT EXISTS dlq_entries (
+      id TEXT PRIMARY KEY,
+      payload TEXT NOT NULL,
+      failure_reason TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      last_attempt_at INTEGER,
+      trace_context TEXT
+    )`,
+    'CREATE INDEX IF NOT EXISTS idx_dlq_entries_created_at ON dlq_entries(created_at)',
+  ],
+};
+
+/** Ordered list of all known migrations, applied in version order. */
+export const sqliteMigrations: SqliteMigration[] = [createDlqEntriesMigration];
+
 function run(db: sqlite3.Database, sql: string): Promise<void> {
   return new Promise((resolve, reject) => db.run(sql, (error) => (error ? reject(error) : resolve())));
 }

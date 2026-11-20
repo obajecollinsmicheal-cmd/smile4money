@@ -159,6 +159,47 @@ async function testQueueStore(createStore: () => any) {
       });
     });
 
+    describe("expiration", () => {
+      it("deletes only entries older than the cutoff and returns count", async () => {
+        const now = Date.now();
+        const day = 24 * 60 * 60 * 1000;
+
+        await store.add({
+          ...createEntry("old1"),
+          createdAt: now - 10 * day,
+        });
+        await store.add({
+          ...createEntry("old2"),
+          createdAt: now - 8 * day,
+        });
+        await store.add({
+          ...createEntry("fresh1"),
+          createdAt: now - 1 * day,
+        });
+        await store.add({
+          ...createEntry("fresh2"),
+          createdAt: now,
+        });
+
+        const cutoff = now - 7 * day;
+        const deleted = await store.deleteExpired(cutoff);
+        expect(deleted).toBe(2);
+
+        const remaining = await store.getAll();
+        expect(remaining.map((entry: DlqEntry) => entry.id)).toEqual([
+          "fresh1",
+          "fresh2",
+        ]);
+      });
+
+      it("returns zero when nothing is expired", async () => {
+        await store.add(createEntry("e1"));
+        const deleted = await store.deleteExpired(Date.now() - 1000);
+        expect(deleted).toBe(0);
+        expect(await store.count()).toBe(1);
+      });
+    });
+
     describe("data integrity", () => {
       it("preserves all fields", async () => {
         const now = Date.now();
@@ -248,6 +289,92 @@ testQueueStore(() => {
   };
 
   return store;
+});
+
+describe("SQLite durability", () => {
+  it("persists entries across close and re-instantiation", async () => {
+    const dbPath = path.join(
+      "/tmp",
+      `test-oracle-queue-durable-${Date.now()}.db`,
+    );
+
+    try {
+      const first = new SQLiteQueueStore(dbPath);
+      await first.initialize();
+      await first.add({
+        id: "persisted",
+        payload: { matchId: 7, nested: { ok: true } },
+        failureReason: "boom",
+        attempts: 2,
+        createdAt: 1000,
+        lastAttemptAt: 2000,
+      });
+      await first.close();
+
+      const second = new SQLiteQueueStore(dbPath);
+      await second.initialize();
+      const all = await second.getAll();
+      expect(all).toHaveLength(1);
+      expect(all[0].id).toBe("persisted");
+      expect(all[0].payload).toEqual({ matchId: 7, nested: { ok: true } });
+      expect(all[0].failureReason).toBe("boom");
+      expect(all[0].attempts).toBe(2);
+      expect(all[0].createdAt).toBe(1000);
+      expect(all[0].lastAttemptAt).toBe(2000);
+      await second.close();
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const file = `${dbPath}${suffix}`;
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file);
+        }
+      }
+    }
+  });
+
+  it("records the dlq_entries migration in schema_version", async () => {
+    const dbPath = path.join(
+      "/tmp",
+      `test-oracle-queue-schema-${Date.now()}.db`,
+    );
+    const store = new SQLiteQueueStore(dbPath);
+
+    const get = <T>(db: sqlite3.Database, sql: string) =>
+      new Promise<T>((resolve, reject) => {
+        db.get(sql, (err: Error | null, row: T) =>
+          err ? reject(err) : resolve(row),
+        );
+      });
+    const close = (db: sqlite3.Database) =>
+      new Promise<void>((resolve, reject) => {
+        db.close((err: Error | null) => (err ? reject(err) : resolve()));
+      });
+
+    try {
+      await store.initialize();
+      await store.close();
+
+      const db = new sqlite3.Database(dbPath);
+      try {
+        const row = await get<{ version: number; name: string }>(
+          db,
+          `SELECT version, name FROM schema_version WHERE name = 'dlq_entries'`,
+        );
+        expect(row).toBeDefined();
+        expect(row.name).toBe("dlq_entries");
+        expect(typeof row.version).toBe("number");
+      } finally {
+        await close(db);
+      }
+    } finally {
+      for (const suffix of ["", "-wal", "-shm"]) {
+        const file = `${dbPath}${suffix}`;
+        if (fs.existsSync(file)) {
+          fs.unlinkSync(file);
+        }
+      }
+    }
+  });
 });
 
 describe("SQLite WAL mode", () => {

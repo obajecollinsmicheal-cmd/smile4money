@@ -171,6 +171,100 @@ async function emitDlqDepth(): Promise<void> {
 
 export type RetryHandler = (entry: DlqEntry) => Promise<void>;
 
+/** Exponential backoff parameters for a job type. */
+export interface BackoffConfig {
+  baseDelayMs: number;
+  maxDelayMs: number;
+  multiplier: number;
+}
+
+/** Default backoff configuration used when no per-type override applies. */
+export const DEFAULT_BACKOFF_CONFIG: BackoffConfig = {
+  baseDelayMs: 1_000,
+  maxDelayMs: 60_000,
+  multiplier: 2,
+};
+
+function parsePositiveNumber(
+  rawValue: string | undefined,
+  fallback: number,
+  label: string,
+): number {
+  if (rawValue === undefined || rawValue.trim() === "") {
+    return fallback;
+  }
+
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    logger.warn(
+      { rawValue, label },
+      "oracle_dlq: invalid backoff value, falling back to default",
+    );
+    return fallback;
+  }
+
+  return parsed;
+}
+
+/**
+ * Resolve the exponential backoff configuration for a job type.
+ *
+ * Per-type overrides are read from the environment using the job type
+ * uppercased with non-alphanumerics replaced by underscores, e.g. for
+ * jobType "oracle-submit":
+ *
+ *   BACKOFF_ORACLE_SUBMIT_BASE_DELAY_MS
+ *   BACKOFF_ORACLE_SUBMIT_MAX_DELAY_MS
+ *   BACKOFF_ORACLE_SUBMIT_MULTIPLIER
+ *
+ * Global overrides (BACKOFF_BASE_DELAY_MS, BACKOFF_MAX_DELAY_MS,
+ * BACKOFF_MULTIPLIER) apply to all job types; per-type values win.
+ */
+export function resolveBackoffConfig(
+  jobType: string,
+  env: NodeJS.ProcessEnv = process.env,
+): BackoffConfig {
+  const prefix = `BACKOFF_${jobType
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "_")}`;
+
+  const baseDelayMs = parsePositiveNumber(
+    env[`${prefix}_BASE_DELAY_MS`] ?? env.BACKOFF_BASE_DELAY_MS,
+    DEFAULT_BACKOFF_CONFIG.baseDelayMs,
+    "baseDelayMs",
+  );
+  const maxDelayMs = parsePositiveNumber(
+    env[`${prefix}_MAX_DELAY_MS`] ?? env.BACKOFF_MAX_DELAY_MS,
+    DEFAULT_BACKOFF_CONFIG.maxDelayMs,
+    "maxDelayMs",
+  );
+  const multiplier = parsePositiveNumber(
+    env[`${prefix}_MULTIPLIER`] ?? env.BACKOFF_MULTIPLIER,
+    DEFAULT_BACKOFF_CONFIG.multiplier,
+    "multiplier",
+  );
+
+  return { baseDelayMs, maxDelayMs, multiplier };
+}
+
+/**
+ * Compute the exponential backoff delay for the given (1-based) attempt
+ * number and job type: min(baseDelayMs * multiplier^(attempt-1), maxDelayMs).
+ */
+export function computeBackoffDelay(
+  attempt: number,
+  jobType: string,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const { baseDelayMs, maxDelayMs, multiplier } = resolveBackoffConfig(
+    jobType,
+    env,
+  );
+  const exponent = Math.max(0, attempt - 1);
+  const delay = baseDelayMs * Math.pow(multiplier, exponent);
+  return Math.min(delay, maxDelayMs);
+}
+
 /**
  * Start the DLQ retry worker. Call once on startup.
  * Returns a cleanup function that stops the worker.
@@ -183,6 +277,7 @@ export type RetryHandler = (entry: DlqEntry) => Promise<void>;
 export function startRetryWorker(
   handler: RetryHandler,
   intervalMs = 60_000,
+  jobType = "default",
 ): () => void {
   const breaker = getCircuitBreaker();
 
@@ -253,11 +348,14 @@ export function startRetryWorker(
             }
           }
 
+          const nextDelayMs = computeBackoffDelay(entry.attempts, jobType);
+
           logger.warn(
             {
               dlqId: entry.id,
               attempt: entry.attempts,
               isRpcError,
+              nextDelayMs,
               err: String(err).substring(0, 100),
             },
             "oracle_dlq: retry failed",
@@ -318,19 +416,24 @@ export async function evictExpiredDlqEntries(
   ttlDays: number = parseDlqTtlDays(process.env.DLQ_TTL_DAYS),
 ): Promise<number> {
   const cutoff = Date.now() - ttlDays * 24 * 60 * 60 * 1000;
-  const entries = await listDlqEntries();
-  const expired = entries.filter((entry) => entry.createdAt < cutoff);
 
-  for (const entry of expired) {
-    await removeDlqEntry(entry.id);
+  try {
+    const deleted = await getQueueStore().deleteExpired(cutoff);
+
+    logger.info(
+      { deleted, ttlDays },
+      "oracle_dlq: TTL eviction run complete",
+    );
+
+    await emitDlqDepth();
+    return deleted;
+  } catch (err) {
+    logger.error(
+      { err: String(err), ttlDays },
+      "oracle_dlq: TTL eviction run failed",
+    );
+    throw err;
   }
-
-  logger.info(
-    { deleted: expired.length, ttlDays },
-    "oracle_dlq: TTL eviction run complete",
-  );
-
-  return expired.length;
 }
 
 /**

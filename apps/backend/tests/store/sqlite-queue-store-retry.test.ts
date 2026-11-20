@@ -196,4 +196,47 @@ describe('SQLiteQueueStore retry integration (#52)', () => {
 
     expect(runCalls).toBeGreaterThanOrEqual(3);
   });
+
+  it('deleteExpired() retries on transient SQLITE_BUSY errors and returns the deleted row count', async () => {
+    await store.initialize();
+
+    const db = (store as unknown as { db: { run: (...args: unknown[]) => unknown } }).db;
+    const originalRun = db.run.bind(db);
+    let runCalls = 0;
+    vi.spyOn(db, 'run').mockImplementation((...args: unknown[]) => {
+      runCalls += 1;
+      const cb = args[args.length - 1] as (this: unknown, err: Error | null) => void;
+      if (runCalls <= 2) {
+        cb.call(db, sqliteError('SQLITE_BUSY', 'database is locked'));
+        return db;
+      }
+      return originalRun(...args);
+    });
+
+    const deletePromise = store.deleteExpired(Date.now());
+    await vi.advanceTimersByTimeAsync(10);
+    await vi.advanceTimersByTimeAsync(20);
+    const deleted = await deletePromise;
+
+    expect(runCalls).toBeGreaterThanOrEqual(3);
+    expect(typeof deleted).toBe('number');
+    expect(deleted).toBeGreaterThanOrEqual(0);
+  });
+
+  it('deleteExpired() propagates a non-retryable error without retrying', async () => {
+    await store.initialize();
+
+    const db = (store as unknown as { db: { run: (...args: unknown[]) => unknown } }).db;
+    const constraintError = sqliteError('SQLITE_CONSTRAINT', 'UNIQUE constraint failed');
+    let runCalls = 0;
+    vi.spyOn(db, 'run').mockImplementation((...args: unknown[]) => {
+      runCalls += 1;
+      const cb = args[args.length - 1] as (this: unknown, err: Error | null) => void;
+      cb.call(db, constraintError);
+      return db;
+    });
+
+    await expect(store.deleteExpired(Date.now())).rejects.toBe(constraintError);
+    expect(runCalls).toBe(1);
+  });
 });

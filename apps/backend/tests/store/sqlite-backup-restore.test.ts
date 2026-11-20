@@ -76,6 +76,7 @@ describe('oracle database restore rehearsal (#104)', () => {
     const verification = await restoreSqliteDatabase(backupPath, dbPath);
     expect(verification.ok).toBe(true);
     expect(verification.tables.oracle_dlq).toBe(3);
+    expect(verification.tables.dlq_entries).toBe(3);
 
     const restored = new SQLiteQueueStore(dbPath);
     await restored.initialize();
@@ -88,6 +89,46 @@ describe('oracle database restore rehearsal (#104)', () => {
       expect(entry?.payload).toEqual(original.payload);
       expect(entry?.attempts).toBe(original.attempts);
       expect(entry?.failureReason).toBe(original.failureReason);
+    }
+  });
+
+  it('persisted DLQ entries survive backup and restore intact', async () => {
+    const dbPath = path.join(dir, 'dlq.db');
+    const backupPath = path.join(dir, 'dlq.backup.db');
+
+    const live = new SQLiteQueueStore(dbPath);
+    await live.initialize();
+    const pending = [
+      settlement('d1', 11, 'Player1'),
+      settlement('d2', 12, 'Draw'),
+    ];
+    for (const entry of pending) await live.add(entry);
+
+    await backupSqliteDatabase(dbPath, backupPath);
+    await live.close();
+
+    // Simulate losing the database entirely, including its WAL files.
+    for (const suffix of ['', '-wal', '-shm']) fs.rmSync(`${dbPath}${suffix}`, { force: true });
+
+    const verification = await verifySqliteBackup(backupPath);
+    expect(verification.ok).toBe(true);
+    expect(verification.tables.dlq_entries).toBe(pending.length);
+
+    await restoreSqliteDatabase(backupPath, dbPath);
+
+    const restored = new SQLiteQueueStore(dbPath);
+    await restored.initialize();
+    const entries = await restored.getAll();
+    await restored.close();
+
+    expect(entries.map((e) => e.id).sort()).toEqual(['d1', 'd2']);
+    for (const original of pending) {
+      const entry = entries.find((e) => e.id === original.id);
+      expect(entry?.payload).toEqual(original.payload);
+      expect(entry?.attempts).toBe(original.attempts);
+      expect(entry?.failureReason).toBe(original.failureReason);
+      expect(entry?.createdAt).toBe(original.createdAt);
+      expect(entry?.lastAttemptAt).toBe(original.lastAttemptAt);
     }
   });
 

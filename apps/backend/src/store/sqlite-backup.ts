@@ -2,7 +2,8 @@
  * Backup, verification and restore for the oracle's SQLite databases (#104).
  *
  * The oracle keeps its durable state in SQLite files: pending result
- * submissions in `oracle-queue.db` (table `oracle_dlq`) and match records in
+ * submissions in `oracle-queue.db` (tables `oracle_dlq` and the versioned
+ * dead-letter queue table `dlq_entries`) and match records in
  * `match-store.db`. Recovery objectives, schedule and the restore procedure
  * are in docs/oracle-db-recovery.md; this module is what that procedure runs,
  * and `tests/store/sqlite-backup-restore.test.ts` rehearses it.
@@ -10,8 +11,14 @@
  * - `backupSqliteDatabase` takes a consistent online snapshot with
  *   `VACUUM INTO`, which is safe while the service is writing (WAL mode) and
  *   produces a single self-contained file with no `-wal`/`-shm` companions.
+ *   The snapshot copies the whole database file, so persisted DLQ entries
+ *   (`dlq_entries`, including its schema-version metadata) are always
+ *   included; no table-specific handling is required.
  * - `verifySqliteBackup` runs `PRAGMA integrity_check` and counts rows per
- *   table, so a backup is known to be usable before it is needed.
+ *   table, so a backup is known to be usable before it is needed. Table
+ *   enumeration is generic, so `dlq_entries` (and any future versioned DLQ
+ *   table) appears in the counts and its row count can be checked after a
+ *   restore to confirm DLQ data survived.
  * - `restoreSqliteDatabase` verifies first, then swaps the file into place
  *   atomically. A corrupt backup never replaces a working database.
  * - `pruneBackups` enforces the retention window.

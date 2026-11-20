@@ -1,4 +1,5 @@
 import { sqliteSettings, configureSqlite } from "./sqlite-config.js";
+import { applySqliteMigrations } from "./sqlite-migrations.js";
 /**
  * SQLite Persistent Queue Store
  *
@@ -153,40 +154,18 @@ export class SQLiteQueueStore implements PersistentQueueStore {
     });
     await configureSqlite(this.getDb());
 
-    await withRetry<void>("initialize:createTable", (cb) =>
-      this.getDb().run(
-        `
-        CREATE TABLE IF NOT EXISTS oracle_dlq (
-          id TEXT PRIMARY KEY NOT NULL,
-          payload TEXT NOT NULL,
-          failureReason TEXT NOT NULL,
-          attempts INTEGER NOT NULL DEFAULT 0,
-          createdAt INTEGER NOT NULL,
-          lastAttemptAt INTEGER,
-          expireAt INTEGER NOT NULL,
-          CONSTRAINT expireAt_check CHECK (expireAt > 0)
-        )
-        `,
-        (err: Error | null) => cb(err),
-      ),
-    );
-
-    await withRetry<void>("initialize:createIndex", (cb) =>
-      this.getDb().run(
-        `CREATE INDEX IF NOT EXISTS idx_oracle_dlq_expireAt ON oracle_dlq(expireAt)`,
-        (err: Error | null) => cb(err),
-      ),
-    );
+    // Versioned schema: creates/upgrades the dlq_entries table and its
+    // indexes, recording the applied version in schema_migrations.
+    await applySqliteMigrations(this.getDb());
 
     this.initialized = true;
   }
 
   async add(entry: DlqEntry): Promise<void> {
-    const expireAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days
     await withRetry<void>("add", (cb) =>
       this.getDb().run(
         `
-        INSERT INTO oracle_dlq (id, payload, failureReason, attempts, createdAt, lastAttemptAt, expireAt)
+        INSERT INTO dlq_entries (id, payload, failure_reason, attempts, created_at, last_attempt_at, trace_context)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         `,
         [
@@ -195,8 +174,8 @@ export class SQLiteQueueStore implements PersistentQueueStore {
           entry.failureReason,
           entry.attempts,
           entry.createdAt,
-          entry.lastAttemptAt,
-          expireAt,
+          entry.lastAttemptAt ?? null,
+          entry.traceContext ? JSON.stringify(entry.traceContext) : null,
         ],
         (err: Error | null) => cb(err),
       ),
@@ -204,36 +183,20 @@ export class SQLiteQueueStore implements PersistentQueueStore {
   }
 
   async getAll(): Promise<DlqEntry[]> {
-    // Delete expired entries first.
-    await withRetry<void>("getAll:deleteExpired", (cb) =>
-      this.getDb().run(
-        `DELETE FROM oracle_dlq WHERE expireAt < ?`,
-        [Date.now()],
-        (err: Error | null) => cb(err),
-      ),
-    );
-
     const rows = await withRetry<any[]>("getAll:select", (cb) =>
       this.getDb().all(
-        `SELECT * FROM oracle_dlq ORDER BY createdAt ASC`,
+        `SELECT * FROM dlq_entries ORDER BY created_at ASC, id ASC`,
         (err: Error | null, result: any[]) => cb(err, result),
       ),
     );
 
-    return (rows || []).map((row) => ({
-      id: row.id,
-      payload: JSON.parse(row.payload),
-      failureReason: row.failureReason,
-      attempts: row.attempts,
-      createdAt: row.createdAt,
-      lastAttemptAt: row.lastAttemptAt || null,
-    }));
+    return (rows || []).map((row) => this.rowToEntry(row));
   }
 
   async remove(id: string): Promise<void> {
     await withRetry<void>("remove", (cb) =>
       this.getDb().run(
-        `DELETE FROM oracle_dlq WHERE id = ?`,
+        `DELETE FROM dlq_entries WHERE id = ?`,
         [id],
         (err: Error | null) => cb(err),
       ),
@@ -249,8 +212,22 @@ export class SQLiteQueueStore implements PersistentQueueStore {
       values.push(updates.attempts);
     }
     if (updates.lastAttemptAt !== undefined) {
-      setClauses.push("lastAttemptAt = ?");
+      setClauses.push("last_attempt_at = ?");
       values.push(updates.lastAttemptAt);
+    }
+    if (updates.failureReason !== undefined) {
+      setClauses.push("failure_reason = ?");
+      values.push(updates.failureReason);
+    }
+    if (updates.payload !== undefined) {
+      setClauses.push("payload = ?");
+      values.push(JSON.stringify(updates.payload));
+    }
+    if (updates.traceContext !== undefined) {
+      setClauses.push("trace_context = ?");
+      values.push(
+        updates.traceContext ? JSON.stringify(updates.traceContext) : null,
+      );
     }
 
     if (setClauses.length === 0) {
@@ -261,7 +238,7 @@ export class SQLiteQueueStore implements PersistentQueueStore {
 
     await withRetry<void>("update", (cb) =>
       this.getDb().run(
-        `UPDATE oracle_dlq SET ${setClauses.join(", ")} WHERE id = ?`,
+        `UPDATE dlq_entries SET ${setClauses.join(", ")} WHERE id = ?`,
         values,
         (err: Error | null) => cb(err),
       ),
@@ -271,8 +248,7 @@ export class SQLiteQueueStore implements PersistentQueueStore {
   async count(): Promise<number> {
     const row = await withRetry<any>("count", (cb) =>
       this.getDb().get(
-        `SELECT COUNT(*) as count FROM oracle_dlq WHERE expireAt > ?`,
-        [Date.now()],
+        `SELECT COUNT(*) as count FROM dlq_entries`,
         (err: Error | null, result: any) => cb(err, result),
       ),
     );
@@ -281,10 +257,41 @@ export class SQLiteQueueStore implements PersistentQueueStore {
 
   async clear(): Promise<void> {
     await withRetry<void>("clear", (cb) =>
-      this.getDb().run(`DELETE FROM oracle_dlq`, (err: Error | null) =>
+      this.getDb().run(`DELETE FROM dlq_entries`, (err: Error | null) =>
         cb(err),
       ),
     );
+  }
+
+  /**
+   * Deletes entries created before `olderThanMs` (epoch millis) and returns
+   * the number of rows removed. Used by the periodic DLQ expiration job.
+   */
+  async deleteExpired(olderThanMs: number): Promise<number> {
+    const deleted = await withRetry<number>("deleteExpired", (cb) =>
+      this.getDb().run(
+        `DELETE FROM dlq_entries WHERE created_at < ?`,
+        [olderThanMs],
+        function (this: sqlite3.RunResult, err: Error | null) {
+          cb(err, this?.changes);
+        },
+      ),
+    );
+    return deleted ?? 0;
+  }
+
+  private rowToEntry(row: any): DlqEntry {
+    return {
+      id: row.id,
+      payload: JSON.parse(row.payload),
+      failureReason: row.failure_reason,
+      attempts: row.attempts,
+      createdAt: row.created_at,
+      lastAttemptAt: row.last_attempt_at ?? null,
+      ...(row.trace_context
+        ? { traceContext: JSON.parse(row.trace_context) }
+        : {}),
+    };
   }
 
   async close(): Promise<void> {

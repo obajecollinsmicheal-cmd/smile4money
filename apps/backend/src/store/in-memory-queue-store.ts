@@ -37,6 +37,19 @@ export class InMemoryQueueStore implements PersistentQueueStore {
     this.store.clear();
   }
 
+  async deleteExpired(olderThanMs: number): Promise<number> {
+    const cutoff = Date.now() - olderThanMs;
+    let deleted = 0;
+    for (const [id, entry] of this.store) {
+      const createdAt = new Date(entry.createdAt).getTime();
+      if (Number.isFinite(createdAt) && createdAt < cutoff) {
+        this.store.delete(id);
+        deleted++;
+      }
+    }
+    return deleted;
+  }
+
   async initialize(): Promise<void> {
     // No-op for in-memory store
   }

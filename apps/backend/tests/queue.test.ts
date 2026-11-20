@@ -10,6 +10,8 @@ import {
   resolveQueueStoreType,
   parseDlqTtlDays,
   evictExpiredDlqEntries,
+  resolveBackoffConfig,
+  computeBackoffDelay,
   type DlqEntry,
 } from "../src/queue.js";
 import { resetCircuitBreaker } from "../src/services/circuit-breaker.js";
@@ -535,6 +537,28 @@ describe('Persistent Queue System', () => {
       const deletedCount = await evictExpiredDlqEntries();
       expect(deletedCount).toBe(1);
     });
+
+    it('evicts multiple expired entries in a single pass', async () => {
+      const e1 = await writeToDlq({ matchId: 1 }, 'old 1');
+      const e2 = await writeToDlq({ matchId: 2 }, 'old 2');
+      const e3 = await writeToDlq({ matchId: 3 }, 'recent');
+
+      await updateDlqEntry(e1.id, { createdAt: Date.now() - 10 * DAY_MS });
+      await updateDlqEntry(e2.id, { createdAt: Date.now() - 9 * DAY_MS });
+      await updateDlqEntry(e3.id, { createdAt: Date.now() - 1 * DAY_MS });
+
+      const deletedCount = await evictExpiredDlqEntries(7);
+      expect(deletedCount).toBe(2);
+
+      const remaining = await listDlqEntries();
+      expect(remaining).toHaveLength(1);
+      expect(remaining[0].id).toBe(e3.id);
+    });
+
+    it('returns 0 when the queue is empty', async () => {
+      const deletedCount = await evictExpiredDlqEntries(7);
+      expect(deletedCount).toBe(0);
+    });
   });
 });
 
@@ -589,5 +613,151 @@ describe('resolveQueueStoreType (#35)', () => {
 
   it('auto-corrects memory to sqlite in production', () => {
     expect(resolveQueueStoreType('memory', 'production')).toBe('sqlite');
+  });
+});
+
+describe('resolveBackoffConfig (#2182)', () => {
+  const ENV_KEYS = [
+    'BACKOFF_DEFAULT_BASE_DELAY_MS',
+    'BACKOFF_DEFAULT_MAX_DELAY_MS',
+    'BACKOFF_DEFAULT_MULTIPLIER',
+    'BACKOFF_MATCH_SYNC_BASE_DELAY_MS',
+    'BACKOFF_MATCH_SYNC_MAX_DELAY_MS',
+    'BACKOFF_MATCH_SYNC_MULTIPLIER',
+  ];
+
+  afterEach(() => {
+    for (const key of ENV_KEYS) {
+      delete process.env[key];
+    }
+  });
+
+  it('returns defaults when no env vars are set', () => {
+    const config = resolveBackoffConfig('match_sync', {});
+    expect(config.baseDelayMs).toBe(1000);
+    expect(config.maxDelayMs).toBe(60000);
+    expect(config.multiplier).toBe(2);
+  });
+
+  it('returns defaults when env is undefined', () => {
+    const config = resolveBackoffConfig('match_sync');
+    expect(config.baseDelayMs).toBe(1000);
+    expect(config.maxDelayMs).toBe(60000);
+    expect(config.multiplier).toBe(2);
+  });
+
+  it('honors per-job-type base delay override', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_MATCH_SYNC_BASE_DELAY_MS: '500',
+    });
+    expect(config.baseDelayMs).toBe(500);
+  });
+
+  it('honors per-job-type max delay override', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_MATCH_SYNC_MAX_DELAY_MS: '30000',
+    });
+    expect(config.maxDelayMs).toBe(30000);
+  });
+
+  it('honors per-job-type multiplier override', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_MATCH_SYNC_MULTIPLIER: '3',
+    });
+    expect(config.multiplier).toBe(3);
+  });
+
+  it('honors all per-job-type overrides together', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_MATCH_SYNC_BASE_DELAY_MS: '250',
+      BACKOFF_MATCH_SYNC_MAX_DELAY_MS: '10000',
+      BACKOFF_MATCH_SYNC_MULTIPLIER: '1.5',
+    });
+    expect(config.baseDelayMs).toBe(250);
+    expect(config.maxDelayMs).toBe(10000);
+    expect(config.multiplier).toBe(1.5);
+  });
+
+  it('falls back to the default config when a job-type override is missing', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_DEFAULT_BASE_DELAY_MS: '200',
+      BACKOFF_DEFAULT_MAX_DELAY_MS: '20000',
+      BACKOFF_DEFAULT_MULTIPLIER: '4',
+    });
+    expect(config.baseDelayMs).toBe(200);
+    expect(config.maxDelayMs).toBe(20000);
+    expect(config.multiplier).toBe(4);
+  });
+
+  it('prefers per-job-type overrides over the default config', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_DEFAULT_BASE_DELAY_MS: '200',
+      BACKOFF_MATCH_SYNC_BASE_DELAY_MS: '750',
+    });
+    expect(config.baseDelayMs).toBe(750);
+  });
+
+  it('ignores invalid values and falls back to defaults', () => {
+    const config = resolveBackoffConfig('match_sync', {
+      BACKOFF_MATCH_SYNC_BASE_DELAY_MS: 'abc',
+      BACKOFF_MATCH_SYNC_MAX_DELAY_MS: '-5',
+      BACKOFF_MATCH_SYNC_MULTIPLIER: '0',
+    });
+    expect(config.baseDelayMs).toBe(1000);
+    expect(config.maxDelayMs).toBe(60000);
+    expect(config.multiplier).toBe(2);
+  });
+
+  it('normalizes job type names for env var lookup', () => {
+    const config = resolveBackoffConfig('Match-Sync', {
+      BACKOFF_MATCH_SYNC_BASE_DELAY_MS: '400',
+    });
+    expect(config.baseDelayMs).toBe(400);
+  });
+});
+
+describe('computeBackoffDelay (#2182)', () => {
+  const config = { baseDelayMs: 1000, maxDelayMs: 10000, multiplier: 2 };
+
+  it('returns the base delay for the first attempt', () => {
+    expect(computeBackoffDelay(1, config)).toBe(1000);
+  });
+
+  it('grows by the multiplier for each subsequent attempt', () => {
+    expect(computeBackoffDelay(2, config)).toBe(2000);
+    expect(computeBackoffDelay(3, config)).toBe(4000);
+    expect(computeBackoffDelay(4, config)).toBe(8000);
+  });
+
+  it('clamps at maxDelayMs', () => {
+    expect(computeBackoffDelay(5, config)).toBe(10000);
+    expect(computeBackoffDelay(10, config)).toBe(10000);
+  });
+
+  it('treats attempt 0 or negative attempts as the first attempt', () => {
+    expect(computeBackoffDelay(0, config)).toBe(1000);
+    expect(computeBackoffDelay(-3, config)).toBe(1000);
+  });
+
+  it('respects a custom multiplier', () => {
+    const custom = { baseDelayMs: 100, maxDelayMs: 100000, multiplier: 3 };
+    expect(computeBackoffDelay(1, custom)).toBe(100);
+    expect(computeBackoffDelay(2, custom)).toBe(300);
+    expect(computeBackoffDelay(3, custom)).toBe(900);
+    expect(computeBackoffDelay(4, custom)).toBe(2700);
+  });
+
+  it('respects a custom max delay', () => {
+    const custom = { baseDelayMs: 100, maxDelayMs: 500, multiplier: 2 };
+    expect(computeBackoffDelay(1, custom)).toBe(100);
+    expect(computeBackoffDelay(2, custom)).toBe(200);
+    expect(computeBackoffDelay(3, custom)).toBe(400);
+    expect(computeBackoffDelay(4, custom)).toBe(500);
+  });
+
+  it('handles a multiplier of 1 (constant delay)', () => {
+    const constant = { baseDelayMs: 500, maxDelayMs: 5000, multiplier: 1 };
+    expect(computeBackoffDelay(1, constant)).toBe(500);
+    expect(computeBackoffDelay(5, constant)).toBe(500);
   });
 });

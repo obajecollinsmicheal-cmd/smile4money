@@ -40,3 +40,17 @@ outcome returns to review. The service serializes review and verification per ga
 within one backend process; run one process per evidence database. Keep operator
 reasons free of personal data. Actual on-chain settlement continues to require the
 contract's privileged oracle authorization.
+
+### Error classification
+
+Every logged error carries a severity so operators can filter and alert on it.
+The four levels, from most to least urgent, are `critical`, `error`, `warning`,
+and `info`. Severity is assigned per entry when it is logged; entries without an
+explicit level default to `error`.
+
+Filtering: pass a `severity` (or minimum severity) to the logger/queue query to
+narrow results to a single level or to everything at or above a threshold.
+
+Alerting: `critical` and `error` entries raise alerts; `warning` and `info` are
+recorded for filtering only. Route alerts through the existing logger/queue
+alerting hooks so severity drives whether an operator is paged.

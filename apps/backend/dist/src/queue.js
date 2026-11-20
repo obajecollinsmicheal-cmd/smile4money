@@ -90,6 +90,19 @@ export async function removeDlqEntry(id) {
 export async function updateDlqEntry(id, updates) {
     await getQueueStore().update(id, updates);
 }
+/**
+ * Back up the DLQ store to the given destination path.
+ * Delegates to the active store; stores that do not support backups
+ * (e.g. the in-memory store) throw an error.
+ */
+export async function backupDlq(destinationPath) {
+    const store = getQueueStore();
+    if (typeof store.backup !== 'function') {
+        throw new Error('Active queue store does not support backups');
+    }
+    await store.backup(destinationPath);
+    logger.info({ destinationPath }, 'oracle_dlq: backup completed');
+}
 /** Emit the oracle_dlq_depth metric. */
 async function emitDlqDepth() {
     const depth = await getQueueStore().count();

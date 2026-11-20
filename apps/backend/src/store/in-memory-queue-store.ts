@@ -6,6 +6,7 @@
  */
 
 import type { DlqEntry, PersistentQueueStore } from './persistent-queue-store.js';
+import { PRIORITY_ORDER } from './persistent-queue-store.js';
 
 export class InMemoryQueueStore implements PersistentQueueStore {
   private store = new Map<string, DlqEntry>();
@@ -15,7 +16,14 @@ export class InMemoryQueueStore implements PersistentQueueStore {
   }
 
   async getAll(): Promise<DlqEntry[]> {
-    return Array.from(this.store.values()).map((e) => ({ ...e }));
+    return Array.from(this.store.values())
+      .map((e) => ({ ...e }))
+      .sort((a, b) => {
+        const pa = PRIORITY_ORDER[a.priority ?? 'medium'];
+        const pb = PRIORITY_ORDER[b.priority ?? 'medium'];
+        if (pa !== pb) return pa - pb;
+        return a.createdAt - b.createdAt;
+      });
   }
 
   async remove(id: string): Promise<void> {

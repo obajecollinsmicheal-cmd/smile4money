@@ -591,3 +591,62 @@ describe('resolveQueueStoreType (#35)', () => {
     expect(resolveQueueStoreType('memory', 'production')).toBe('sqlite');
   });
 });
+
+describe('Job priority levels (#2183)', () => {
+  beforeEach(async () => {
+    process.env.QUEUE_STORE = 'memory';
+    await initializeQueue();
+  });
+
+  afterEach(async () => {
+    await closeQueue();
+  });
+
+  it('defaults priority to medium when not specified', async () => {
+    const entry = await writeToDlq({ matchId: 1 }, 'rpc error');
+    expect(entry.priority).toBe('medium');
+  });
+
+  it('accepts high priority', async () => {
+    const entry = await writeToDlq({ matchId: 1 }, 'rpc error', 'high');
+    expect(entry.priority).toBe('high');
+  });
+
+  it('accepts low priority', async () => {
+    const entry = await writeToDlq({ matchId: 1 }, 'rpc error', 'low');
+    expect(entry.priority).toBe('low');
+  });
+
+  it('orders queue: high before medium before low', async () => {
+    // Insert in reverse priority order. Same createdAt is fine because
+    // priority takes precedence over insertion time.
+    const low  = await writeToDlq({ matchId: 1 }, 'err', 'low');
+    const med  = await writeToDlq({ matchId: 2 }, 'err', 'medium');
+    const high = await writeToDlq({ matchId: 3 }, 'err', 'high');
+
+    const entries = await listDlqEntries();
+    const ids = entries.map(e => e.id);
+    expect(ids.indexOf(high.id)).toBeLessThan(ids.indexOf(med.id));
+    expect(ids.indexOf(med.id)).toBeLessThan(ids.indexOf(low.id));
+  });
+
+  it('processes high-priority entries before lower-priority ones', async () => {
+    await writeToDlq({ step: 'low' },  'err', 'low');
+    await writeToDlq({ step: 'high' }, 'err', 'high');
+
+    const processed: string[] = [];
+    const handler = vi.fn().mockImplementation(async (entry: DlqEntry) => {
+      processed.push(entry.priority ?? 'medium');
+    });
+
+    const stop = startRetryWorker(handler, 100);
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+    } finally {
+      stop();
+    }
+
+    expect(processed[0]).toBe('high');
+    expect(processed[1]).toBe('low');
+  });
+});

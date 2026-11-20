@@ -24,6 +24,7 @@ import type {
   DlqEntry,
   PersistentQueueStore,
 } from "./persistent-queue-store.js";
+import { PRIORITY_ORDER } from "./persistent-queue-store.js";
 import logger from "../logger.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -164,7 +165,9 @@ export class SQLiteQueueStore implements PersistentQueueStore {
           createdAt INTEGER NOT NULL,
           lastAttemptAt INTEGER,
           expireAt INTEGER NOT NULL,
-          CONSTRAINT expireAt_check CHECK (expireAt > 0)
+          priority TEXT NOT NULL DEFAULT 'medium',
+          CONSTRAINT expireAt_check CHECK (expireAt > 0),
+          CONSTRAINT priority_check CHECK (priority IN ('high', 'medium', 'low'))
         )
         `,
         (err: Error | null) => cb(err),
@@ -178,7 +181,38 @@ export class SQLiteQueueStore implements PersistentQueueStore {
       ),
     );
 
+    // Apply schema migrations for existing databases that pre-date the priority
+    // column (#2183).  The migration checks whether the column already exists
+    // so it is safe to run against both new and pre-existing databases.
+    await this.applyPriorityColumnMigration();
+
     this.initialized = true;
+  }
+
+  /**
+   * Adds the `priority` column to `oracle_dlq` if it is not already present.
+   * This is idempotent: safe to call on both new databases (column already in
+   * the CREATE TABLE) and existing ones that pre-date the column.
+   */
+  private async applyPriorityColumnMigration(): Promise<void> {
+    // PRAGMA table_info returns one row per column; check for 'priority'.
+    const columns = await withRetry<any[]>("migration:tableInfo", (cb) =>
+      this.getDb().all(
+        `PRAGMA table_info(oracle_dlq)`,
+        (err: Error | null, rows: any[]) => cb(err, rows),
+      ),
+    );
+
+    const hasPriority = columns.some((col: any) => col.name === "priority");
+    if (!hasPriority) {
+      await withRetry<void>("migration:addPriorityColumn", (cb) =>
+        this.getDb().run(
+          `ALTER TABLE oracle_dlq ADD COLUMN priority TEXT NOT NULL DEFAULT 'medium'`,
+          (err: Error | null) => cb(err),
+        ),
+      );
+      logger.info({}, "oracle_dlq: migrated schema — added priority column");
+    }
   }
 
   async add(entry: DlqEntry): Promise<void> {
@@ -186,8 +220,8 @@ export class SQLiteQueueStore implements PersistentQueueStore {
     await withRetry<void>("add", (cb) =>
       this.getDb().run(
         `
-        INSERT INTO oracle_dlq (id, payload, failureReason, attempts, createdAt, lastAttemptAt, expireAt)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO oracle_dlq (id, payload, failureReason, attempts, createdAt, lastAttemptAt, expireAt, priority)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         `,
         [
           entry.id,
@@ -197,6 +231,7 @@ export class SQLiteQueueStore implements PersistentQueueStore {
           entry.createdAt,
           entry.lastAttemptAt,
           expireAt,
+          entry.priority ?? "medium",
         ],
         (err: Error | null) => cb(err),
       ),
@@ -215,7 +250,10 @@ export class SQLiteQueueStore implements PersistentQueueStore {
 
     const rows = await withRetry<any[]>("getAll:select", (cb) =>
       this.getDb().all(
-        `SELECT * FROM oracle_dlq ORDER BY createdAt ASC`,
+        `SELECT * FROM oracle_dlq
+         ORDER BY
+           CASE priority WHEN 'high' THEN 0 WHEN 'medium' THEN 1 WHEN 'low' THEN 2 ELSE 1 END ASC,
+           createdAt ASC`,
         (err: Error | null, result: any[]) => cb(err, result),
       ),
     );
@@ -227,6 +265,7 @@ export class SQLiteQueueStore implements PersistentQueueStore {
       attempts: row.attempts,
       createdAt: row.createdAt,
       lastAttemptAt: row.lastAttemptAt || null,
+      priority: (row.priority ?? "medium") as DlqEntry["priority"],
     }));
   }
 

@@ -306,6 +306,7 @@
         "enum": [
           "VALIDATION_ERROR",
           "UNAUTHORIZED",
+          "FORBIDDEN",
           "NOT_FOUND",
           "CONFLICT",
           "RATE_LIMITED",
@@ -322,7 +323,9 @@
             "type": "object",
             "required": [
               "code",
-              "message"
+              "message",
+              "suggestion",
+              "documentation"
             ],
             "properties": {
               "code": {
@@ -330,6 +333,13 @@
               },
               "message": {
                 "type": "string"
+              },
+              "suggestion": {
+                "type": "string"
+              },
+              "documentation": {
+                "type": "string",
+                "format": "uri"
               },
               "hint": {
                 "type": "string"

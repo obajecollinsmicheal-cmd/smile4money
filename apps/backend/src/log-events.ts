@@ -20,6 +20,7 @@ export const LOG_EVENTS = new Set([
   "game_poll_rate_limited_will_retry",
   "game_still_in_progress",
   "http_request",
+  "http_request_failed",
   "http_server_listening",
   "oracle_dlq: QUEUE_STORE=memory is not safe in production (DLQ entries are lost on restart); auto-falling back to sqlite. See docs/oracle.md#queue-store-persistence.",
   "oracle_dlq: QUEUE_STORE=mongodb requested but the mongoose dependency is not installed; falling back to sqlite",

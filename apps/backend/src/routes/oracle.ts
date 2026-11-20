@@ -2,7 +2,6 @@ import { Router } from 'express';
 import { matchStore, evidenceStore } from '../store/index.js';
 import { authenticate } from '../middleware/auth.js';
 import { validateSubmitResultInput, verifyGameResult } from '../services/oracle-service.js';
-import { errorToHttpStatus } from '../errors/errorToHttpStatus.js';
 import { errorEnvelope, ErrorCode, statusToErrorCode } from '../errors/errorResponse.js';
 
 const router = Router();
@@ -34,7 +33,7 @@ router.use(authenticate);
  * The oracle (a privileged service) must then sign the result and call the
  * escrow contract's `submit_result` method on Stellar Soroban.
  */
-router.post('/submit-result', async (req, res) => {
+router.post('/submit-result', async (req, res, next) => {
   const payload = req.body;
 
   if (!payload || typeof payload !== 'object') {
@@ -72,13 +71,7 @@ router.post('/submit-result', async (req, res) => {
       message: result.message,
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Unknown error';
-    // #47 — mapped centrally so e.g. an upstream RateLimitError surfaces as
-    // 429 here instead of always flattening to 500.
-    return res.status(errorToHttpStatus(error)).json({
-      error: 'Result verification failed',
-      details: message,
-    });
+    return next(error);
   }
 });
 

@@ -27,26 +27,56 @@ const ENUM_FIELDS: Record<string, readonly string[]> = {
   metric: ['oracle_dlq_depth'],
 };
 
+function safeErrorDetails(error: unknown): Record<string, unknown> {
+  if (!(error instanceof Error)) {
+    return { type: 'NonErrorThrown', valueType: typeof error };
+  }
+
+  const type = /^[A-Z][A-Za-z0-9_$]{0,58}Error$/.test(error.name)
+    ? error.name
+    : 'Error';
+  const stack = (error.stack ?? '')
+    .split('\n')
+    .slice(1)
+    .filter((frame) => /^\s+at\s/.test(frame))
+    .map((frame) =>
+      frame
+        .replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, '[REDACTED]')
+        .replace(/\bBearer\s+\S+/gi, 'Bearer [REDACTED]')
+        .replace(/\b[GS][A-Z2-7]{55}\b/g, '[REDACTED]')
+        .replace(/\b\+?\d[\d(). -]{7,}\d\b/g, '[REDACTED]')
+        .replace(
+          /([?&](?:access_token|api[_-]?key|password|secret|token)=)[^&\s)]+/gi,
+          '$1[REDACTED]',
+        ),
+    );
+
+  return { type, stack };
+}
+
 /** Unknown fields and all arbitrary strings/errors are masked at the sink. */
 export function safeLogContext(
-  context: Record<string, unknown>,
+  context: object,
 ): Record<string, unknown> {
   return Object.fromEntries(
-    Object.entries(context)
+    Object.entries(context as Record<string, unknown>)
       .filter(
-        ([key]) =>
+        ([key, value]) =>
+          key === 'error' ||
           NUMERIC_FIELDS.has(key) ||
           Object.prototype.hasOwnProperty.call(ENUM_FIELDS, key),
       )
       .map(([key, value]) => [
         key,
-        NUMERIC_FIELDS.has(key) &&
-        typeof value === 'number' &&
-        Number.isFinite(value)
-          ? value
-          : typeof value === 'string' && ENUM_FIELDS[key]?.includes(value)
+        key === 'error'
+          ? safeErrorDetails(value)
+          : NUMERIC_FIELDS.has(key) &&
+              typeof value === 'number' &&
+              Number.isFinite(value)
             ? value
-            : '[REDACTED]',
+            : typeof value === 'string' && ENUM_FIELDS[key]?.includes(value)
+              ? value
+              : '[REDACTED]',
       ]),
   );
 }
@@ -56,22 +86,38 @@ export function safeLogContext(
  * Outputs JSON to stdout for easy parsing and forwarding to logging services.
  */
 
-interface LogContext {
-  [key: string]: any;
-}
+type LogContext = object;
 
-type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'critical';
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
   debug: 0,
   info: 1,
   warn: 2,
   error: 3,
+  critical: 4,
+};
+
+const SEVERITY_BY_LEVEL: Record<LogLevel, string> = {
+  debug: 'info',
+  info: 'info',
+  warn: 'warning',
+  error: 'error',
+  critical: 'critical',
 };
 
 function configuredLevel(): LogLevel {
   const raw = (process.env.LOG_LEVEL || '').toLowerCase();
-  if (raw === 'debug' || raw === 'info' || raw === 'warn' || raw === 'error') {
+  if (raw === 'warning') {
+    return 'warn';
+  }
+  if (
+    raw === 'debug' ||
+    raw === 'info' ||
+    raw === 'warn' ||
+    raw === 'error' ||
+    raw === 'critical'
+  ) {
     return raw;
   }
   return process.env.NODE_ENV === 'production' ? 'info' : 'debug';
@@ -90,6 +136,7 @@ class Logger {
     const logEntry = {
       timestamp: new Date().toISOString(),
       level,
+      severity: SEVERITY_BY_LEVEL[level],
       service: 'smile4money-backend',
       message: LOG_EVENTS.has(message) ? message : 'log_event',
       ...safeLogContext(context),
@@ -126,6 +173,14 @@ class Logger {
       this.log('error', {}, context);
     } else {
       this.log('error', context, message || '');
+    }
+  }
+
+  critical(context: LogContext | string, message?: string): void {
+    if (typeof context === 'string') {
+      this.log('critical', {}, context);
+    } else {
+      this.log('critical', context, message || '');
     }
   }
 }

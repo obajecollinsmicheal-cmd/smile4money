@@ -56,7 +56,7 @@ it.each([200, 500])(
   },
 );
 
-it("masks unapproved event messages and serializes neither error objects nor nested context", () => {
+it("masks unapproved event messages and serializes errors without their message", () => {
   const log = vi.spyOn(console, "log").mockImplementation(() => {});
   logger.error(
     { error: new Error("secret"), arbitrary: { token: "secret" }, status: 500 },
@@ -65,6 +65,8 @@ it("masks unapproved event messages and serializes neither error objects nor nes
   expect(JSON.parse(log.mock.calls[0][0])).toMatchObject({
     message: "log_event",
     status: 500,
+    error: { type: "Error" },
   });
+  expect(JSON.parse(log.mock.calls[0][0]).error.stack.length).toBeGreaterThan(0);
   expect(log.mock.calls[0][0]).not.toContain("secret");
 });

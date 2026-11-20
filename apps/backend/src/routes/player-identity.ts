@@ -4,6 +4,7 @@ import {
   confirmIdentityLink,
   createIdentityLinkChallenge,
 } from '../services/player-identity.js';
+import { ErrorCode, errorEnvelope } from '../errors/errorResponse.js';
 
 const router = Router();
 router.use(authenticate);
@@ -13,7 +14,12 @@ router.post('/challenge', (req, res) => {
   if (!req.address)
     return res
       .status(401)
-      .json({ error: 'Authenticated wallet address is required' });
+      .json(
+        errorEnvelope(
+          ErrorCode.UNAUTHORIZED,
+          'Authenticated wallet address is required',
+        ),
+      );
   try {
     const challenge = createIdentityLinkChallenge(
       req.address,
@@ -22,25 +28,47 @@ router.post('/challenge', (req, res) => {
     );
     return res.status(200).json(challenge);
   } catch (error) {
-    return res.status(400).json({
-      error: error instanceof Error ? error.message : 'Invalid link request',
-    });
+    return res
+      .status(400)
+      .json(
+        errorEnvelope(
+          ErrorCode.VALIDATION_ERROR,
+          error instanceof Error ? error.message : 'Invalid link request',
+        ),
+      );
   }
 });
 
 router.post('/confirm', async (req, res) => {
   const { nonce, signature } = req.body ?? {};
   if (typeof nonce !== 'string' || typeof signature !== 'string') {
-    return res.status(400).json({ error: 'nonce and signature are required' });
+    return res
+      .status(400)
+      .json(
+        errorEnvelope(
+          ErrorCode.VALIDATION_ERROR,
+          'nonce and signature are required',
+        ),
+      );
   }
   if (!req.address)
     return res
       .status(401)
-      .json({ error: 'Authenticated wallet address is required' });
+      .json(
+        errorEnvelope(
+          ErrorCode.UNAUTHORIZED,
+          'Authenticated wallet address is required',
+        ),
+      );
   if (!(await confirmIdentityLink(nonce, req.address, signature))) {
-    return res.status(400).json({
-      error: 'Invalid, expired, replayed, or wrong-wallet identity proof',
-    });
+    return res
+      .status(400)
+      .json(
+        errorEnvelope(
+          ErrorCode.VALIDATION_ERROR,
+          'Invalid, expired, replayed, or wrong-wallet identity proof',
+        ),
+      );
   }
   return res.status(200).json({ linked: true });
 });

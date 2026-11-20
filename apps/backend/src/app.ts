@@ -6,8 +6,8 @@ import validateGameRouter from './routes/validate-game.js';
 import reviewRouter from './routes/oracle-review.js';
 import oracleRouter from './routes/oracle.js';
 import playerIdentityRouter from './routes/player-identity.js';
-import { errorToHttpStatus } from './errors/errorToHttpStatus.js';
 import { requestLogging } from './middleware/request-logging.js';
+import { apiErrorHandler } from './middleware/error-handler.js';
 
 /**
  * Parse the ALLOWED_ORIGINS environment variable into an array of origin strings.
@@ -55,18 +55,13 @@ app.use('/api/oracle/reviews', reviewRouter);
 app.use('/api/oracle', oracleRouter);
 app.use('/api/player-identity', playerIdentityRouter);
 
-// Fallback for any error a route handler doesn't catch itself, so every
-// route ends up with the same JSON error shape and the same centralized
-// status-code mapping (#47) rather than Express's default HTML error page.
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  const status = errorToHttpStatus(err);
-  const message = err instanceof Error ? err.message : 'Unknown error';
-  res.status(status).json({ error: message });
-});
-
 // Public service status (#115). Mounted here, after the other routes, so the
 // route list above stays untouched; the handler never throws.
 import statusRouter from './routes/status.js';
 app.use('/status', statusRouter);
+
+// Keep the error handler last so failures from every mounted route receive
+// the same safe, structured response and log treatment.
+app.use(apiErrorHandler);
 
 export default app;

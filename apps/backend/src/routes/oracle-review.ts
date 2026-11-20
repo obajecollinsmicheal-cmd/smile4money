@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { authenticate } from '../middleware/auth.js';
 import { evidenceStore } from '../store/index.js';
 import { withGameLock, type EvidenceStore } from '../store/evidence-store.js';
+import { ErrorCode, errorEnvelope } from '../errors/errorResponse.js';
 
 export function createReviewRouter(ledger: EvidenceStore) {
   const router = Router();
@@ -12,14 +13,18 @@ export function createReviewRouter(ledger: EvidenceStore) {
       .map((s) => s.trim())
       .filter(Boolean);
     if (!req.address || !operators.includes(req.address))
-      return res.status(403).json({ error: 'Administrator required' });
+      return res
+        .status(403)
+        .json(errorEnvelope(ErrorCode.FORBIDDEN, 'Administrator required'));
     next();
   });
   router.get('/:gameId', async (req, res, next) => {
     try {
       const history = await ledger.history(req.params.gameId);
       if (!history.length)
-        return res.status(404).json({ error: 'Evidence not found' });
+        return res
+          .status(404)
+          .json(errorEnvelope(ErrorCode.NOT_FOUND, 'Evidence not found'));
       res.json({ history });
     } catch (error) {
       next(error);
@@ -36,7 +41,12 @@ export function createReviewRouter(ledger: EvidenceStore) {
     ) {
       return res
         .status(400)
-        .json({ error: 'Provide only a reason (1–500 characters)' });
+        .json(
+          errorEnvelope(
+            ErrorCode.VALIDATION_ERROR,
+            'Provide only a reason (1–500 characters)',
+          ),
+        );
     }
     try {
       const decision = await withGameLock(req.params.gameId, async () => {
@@ -53,7 +63,14 @@ export function createReviewRouter(ledger: EvidenceStore) {
         });
       });
       if (decision === null)
-        return res.status(409).json({ error: 'Match is not awaiting review' });
+        return res
+          .status(409)
+          .json(
+            errorEnvelope(
+              ErrorCode.CONFLICT,
+              'Match is not awaiting review',
+            ),
+          );
       res.json({ decisionId: decision, state: 'retry_requested' });
     } catch (error) {
       next(error);

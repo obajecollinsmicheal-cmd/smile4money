@@ -91,6 +91,37 @@ describe('Structured JSON Logger', () => {
     expect(json.error_code).toBeUndefined();
   });
 
+  it('logs structured error type and stack frames without the error message', () => {
+    const error = new Error('Bearer token-secret and person@example.com');
+    const stellarAddress = `G${'A'.repeat(55)}`;
+    error.stack = [
+      'Error: Bearer token-secret and person@example.com',
+      '    at request (https://example.test/?token=token-secret)',
+      '    at person (file:///tmp/person@example.com)',
+      '    at phone (file:///tmp/555-123-4567)',
+      `    at wallet (${stellarAddress})`,
+    ].join('\n');
+    logger.error({ error, status: 500 }, 'http_request_failed');
+
+    const json = JSON.parse(logOutput.join('').trim());
+    expect(json).toMatchObject({
+      level: 'error',
+      severity: 'error',
+      message: 'http_request_failed',
+      status: 500,
+      error: { type: 'Error' },
+    });
+    expect(json.error.stack).toEqual([
+      '    at request (https://example.test/?token=[REDACTED])',
+      '    at person (file:///tmp/[REDACTED])',
+      '    at phone (file:///tmp/[REDACTED])',
+      '    at wallet ([REDACTED])',
+    ]);
+    expect(logOutput.join('')).not.toMatch(
+      /token-secret|person@example\.com|555-123-4567|G[A-Z2-7]{55}/,
+    );
+  });
+
   it('logger handles empty context correctly', () => {
     logger.info({}, 'empty_context_test');
 
@@ -185,6 +216,26 @@ describe('Structured JSON Logger', () => {
 
       logger.error({}, 'should_appear');
       expect(logOutput.join('')).not.toBe('');
+    });
+
+    it('supports severity filtering and emits normalized severity names', () => {
+      process.env.LOG_LEVEL = 'warning';
+      expect(logger.isLevelEnabled('warn')).toBe(true);
+      expect(logger.isLevelEnabled('info')).toBe(false);
+      logger.warn({}, 'http_request_failed');
+
+      const json = JSON.parse(logOutput.join('').trim());
+      expect(json).toMatchObject({ level: 'warn', severity: 'warning' });
+
+      logOutput = [];
+      process.env.LOG_LEVEL = 'critical';
+      expect(logger.isLevelEnabled('critical')).toBe(true);
+      expect(logger.isLevelEnabled('error')).toBe(false);
+      logger.critical({}, 'Failed to start server');
+      expect(JSON.parse(logOutput.join('').trim())).toMatchObject({
+        level: 'critical',
+        severity: 'critical',
+      });
     });
 
     it('an invalid LOG_LEVEL value falls back to the environment default rather than throwing', () => {

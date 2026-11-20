@@ -1556,15 +1556,21 @@ Every error response from the backend API follows the same envelope:
 {
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "gameId is required"
+    "message": "gameId is required",
+    "suggestion": "Check the request fields and correct the invalid or missing values.",
+    "documentation": "https://github.com/obajecollinsmicheal-cmd/smile4money/blob/master/docs/api-reference.md#recovering-from-errors"
   }
 }
 ```
 
 - `error.code` — a stable, machine-readable string. API consumers should branch on this, not on `error.message` (which is meant for humans and may be reworded).
 - `error.message` — a human-readable description of what went wrong.
+- `error.suggestion` — an actionable next step for correcting or retrying the request.
+- `error.documentation` — a link to this section's recovery guidance.
 
-Some error responses include additional fields inside `error` (e.g. `error.hint`) for extra machine-readable context, but `code` and `message` are always present.
+The `suggestion` and `documentation` fields are always present; some responses
+also include additional fields inside `error` (e.g. `error.hint`) for extra
+machine-readable context.
 
 `/api/validate-game`'s failure responses are the one exception: because that endpoint's job is to report on a game's validity as a normal (non-exceptional) outcome, its `valid`/`platform`/`gameId`/`message` fields are also present at the top level alongside `error`, for backward compatibility with existing consumers of that specific endpoint.
 
@@ -1574,12 +1580,37 @@ Some error responses include additional fields inside `error` (e.g. `error.hint`
 |---|---|---|
 | `VALIDATION_ERROR` | 400 | The request body or its fields are missing, malformed, or fail a business rule. |
 | `UNAUTHORIZED` | 401 | The `Authorization` header is missing, malformed, or the JWT is invalid/expired. |
+| `FORBIDDEN` | 403 | The caller is authenticated but lacks permission for the operation. |
 | `NOT_FOUND` | 404 | The referenced resource (a match, a game on the upstream chess platform) does not exist. |
 | `CONFLICT` | 409 | The request conflicts with existing state (e.g. a duplicate `gameId`). |
 | `RATE_LIMITED` | 429 | The caller has exceeded the endpoint's rate limit. |
 | `INTERNAL_ERROR` | 500 | An unexpected server-side failure. |
 
 This mapping lives in `apps/backend/src/errors/errorResponse.ts` (`ErrorCode`, `errorEnvelope`, `statusToErrorCode`) — that module is the source of truth if this table and the code ever disagree.
+
+### Recovering from errors
+
+| Error code | Suggested recovery |
+|---|---|
+| `VALIDATION_ERROR` | Correct missing or invalid fields, then submit the request again. |
+| `UNAUTHORIZED` | Provide a valid, unexpired bearer token with the required permissions. |
+| `FORBIDDEN` | Ask an administrator to grant the permissions required for the operation. |
+| `NOT_FOUND` | Verify the resource identifier and confirm the resource exists. |
+| `CONFLICT` | Refresh the resource state and retry without duplicating existing data. |
+| `RATE_LIMITED` | Wait before retrying and use exponential backoff. |
+| `INTERNAL_ERROR` | Retry once. If it persists, contact support with the request time; internal details are intentionally not returned. |
+
+### Error log severity
+
+Backend logs are JSON records with a normalized `severity` field (`info`,
+`warning`, `error`, or `critical`) in addition to the logger `level`. Error
+records include the error type and stack frames but omit the exception message
+and unapproved context fields to avoid recording secrets or personal data.
+Email addresses, phone numbers, bearer credentials, Stellar keys, and
+credential-like URL parameters in stack frames are redacted before output.
+Set `LOG_LEVEL` to `info`, `warning` (or `warn`), `error`, or `critical` to
+filter records. Configure log-aggregator alerts on `severity=critical` for
+immediate operator attention and `severity=error` for application failures.
 
 ### Example
 
@@ -1594,7 +1625,9 @@ curl -s -X POST http://localhost:4000/api/matches \
 {
   "error": {
     "code": "VALIDATION_ERROR",
-    "message": "player2 is required"
+    "message": "player2 is required",
+    "suggestion": "Check the request fields and correct the invalid or missing values.",
+    "documentation": "https://github.com/obajecollinsmicheal-cmd/smile4money/blob/master/docs/api-reference.md#recovering-from-errors"
   }
 }
 ```

@@ -190,6 +190,41 @@ pub enum Error {
 
     /// [E037] Match is not in a contested state.
     NotContested = 37,
+
+    /// [E038] The contract has not been initialized.
+    NotInitialized = 38,
+
+    /// [E039] `claim_timeout` was called before the match timed out.
+    TimeoutNotReached = 39,
+
+    /// [E040] `confirm_drain` was called with no drain pending.
+    NoPendingDrain = 40,
+
+    /// [E041] The pending drain's approval window has passed.
+    DrainApprovalExpired = 41,
+
+    /// [E042] The drain confirmer is the same address that initiated it.
+    SameSignerNotAllowed = 42,
+
+    /// [E043] The token does not implement the SEP-41 interface.
+    TokenNotSep41 = 43,
+
+    /// [E044] The token's metadata (decimals, name, symbol) fails validation.
+    InvalidTokenMetadata = 44,
+
+    /// [E045] The caller's role does not grant the required permission.
+    ///
+    /// **Shared** variant, but escrow already uses code 35 (`DisputeActive`),
+    /// so it maps to 45 here.
+    InsufficientPermission = 45,
+
+    /// [E046] The game ID doesn't match its platform's format: 8 alphanumeric
+    /// characters for Lichess, 1-20 digits (no leading zero) for Chess.com.
+    InvalidGameIdFormat = 46,
+
+    /// [E047] `set_stake_limits` was given a range that isn't
+    /// `0 < min <= max <= MAX_STAKE`.
+    InvalidStakeLimits = 47,
 }
 
 /// Convert a [`SharedError`] into an escrow [`Error`].
@@ -205,6 +240,9 @@ impl From<SharedError> for Error {
             SharedError::InvalidGameId => Error::InvalidGameId,
             SharedError::TransferFailed => Error::TransferFailed,
             SharedError::InvalidAdmin => Error::InvalidAdmin,
+            SharedError::InsufficientPermission => Error::InsufficientPermission,
+            SharedError::TokenNotSep41 => Error::TokenNotSep41,
+            SharedError::InvalidTokenMetadata => Error::InvalidTokenMetadata,
         }
     }
 }

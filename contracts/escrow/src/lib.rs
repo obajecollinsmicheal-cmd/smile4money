@@ -72,16 +72,19 @@ use soroban_sdk::{contract, contractimpl, symbol_short, token, vec, Address, Byt
 const CONTRACT_PAUSED: Symbol = symbol_short!("paused");
 /// Topic symbol for the event emitted when the contract is unpaused.
 const CONTRACT_UNPAUSED: Symbol = symbol_short!("unpaused");
-use types::{DataKey, DisputeEvidenceRecord, Match, MatchState, OptionalWinner, Platform, Winner};
+use types::{
+    AdminRole, DataKey, DisputeEvidenceRecord, Match, MatchState, OptionalWinner, PendingDrain,
+    Permission, Platform, StakeLimits, Winner,
+};
 
 fn is_zero_address(env: &Env, addr: &Address) -> bool {
-    // The all-zeros Stellar account key encodes to this strkey.
-    // We construct the Address via the ScAddress XDR path since
-    // TryFromVal<Env, String> is not implemented for Address.
-    use soroban_sdk::xdr::{AccountId, PublicKey, ScAddress, Uint256};
-    let zero_key = Uint256([0u8; 32]);
-    let sc_addr = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(zero_key)));
-    let zero_address = Address::try_from_val(env, &sc_addr).expect("invalid zero address");
+    // The all-zeros ed25519 account key as a strkey. Built from the string
+    // because the XDR `ScAddress` conversion is host-only and doesn't exist in
+    // the wasm build.
+    let zero_address = Address::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
     addr == &zero_address
 }
 
@@ -117,6 +120,34 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::Admin)
             .ok_or(Error::NotInitialized)
+    }
+
+    /// The stake range (inclusive, smallest token unit) new matches must fall in.
+    pub fn get_stake_limits(env: Env) -> StakeLimits {
+        Self::stake_limits(&env)
+    }
+
+    /// Set the stake range for new matches (#2059). Requires
+    /// [`Permission::TokenManagement`] (primary or secondary admin).
+    ///
+    /// `min` and `max` are inclusive and must satisfy
+    /// `0 < min <= max <= MAX_STAKE`; `MAX_STAKE` is a hard ceiling so payouts
+    /// can't overflow. Existing matches keep the stake they were created with.
+    pub fn set_stake_limits(env: Env, caller: Address, min: i128, max: i128) -> Result<(), Error> {
+        Self::require_permission(&env, &caller, Permission::TokenManagement)?;
+        caller.require_auth();
+        if min <= 0 || min > max || max > MAX_STAKE {
+            return Err(Error::InvalidStakeLimits);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeLimits, &StakeLimits { min, max });
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("stk_lim")),
+            (caller, min, max),
+        );
+        Ok(())
     }
 
     /// Return the role assigned to `account`, or `None` if it holds no role.
@@ -320,6 +351,44 @@ impl EscrowContract {
     ///
     /// The string is copied into a fixed 64-byte stack buffer — the same size as
     /// `MAX_GAME_ID_LEN` — so no heap allocation is required inside the WASM guest.
+    /// Whether `game_id` has the format `platform` issues (#2062).
+    ///
+    /// * Lichess: exactly 8 ASCII alphanumeric characters (e.g. `q7ZvsdUF`).
+    /// * Chess.com: the numeric game ID, 1-20 digits with no leading zero
+    ///   (e.g. `98765432101`).
+    ///
+    /// Assumes the generic length check has already passed.
+    fn game_id_matches_platform(game_id: &soroban_sdk::String, platform: &Platform) -> bool {
+        let len = game_id.len() as usize;
+        if len > MAX_GAME_ID_LEN as usize {
+            return false;
+        }
+        let mut buf = [0u8; MAX_GAME_ID_LEN as usize];
+        game_id.copy_into_slice(&mut buf[..len]);
+        let id = &buf[..len];
+        match platform {
+            Platform::Lichess => {
+                len == LICHESS_GAME_ID_LEN && id.iter().all(|b| b.is_ascii_alphanumeric())
+            }
+            Platform::ChessDotCom => {
+                (1..=CHESSCOM_GAME_ID_MAX_LEN).contains(&len)
+                    && id[0] != b'0'
+                    && id.iter().all(|b| b.is_ascii_digit())
+            }
+        }
+    }
+
+    /// The stake range applied to new matches (#2059).
+    fn stake_limits(env: &Env) -> StakeLimits {
+        env.storage()
+            .instance()
+            .get(&DataKey::StakeLimits)
+            .unwrap_or(StakeLimits {
+                min: MIN_STAKE,
+                max: MAX_STAKE,
+            })
+    }
+
     fn is_valid_game_id(game_id: &soroban_sdk::String) -> bool {
         let len = game_id.len() as usize;
         // Safety: len is already validated to be in [1, MAX_GAME_ID_LEN].
@@ -437,8 +506,8 @@ impl EscrowContract {
         let client = token::Client::new(env, &m.token);
         let refund_total = m.stake_amount * 2;
         Self::ensure_reserve_for_payout(env, &m.token, refund_total as i128)?;
-        client.transfer(&env.current_contract_address(), &m.player1, m.stake_amount as i128);
-        client.transfer(&env.current_contract_address(), &m.player2, m.stake_amount as i128);
+        client.transfer(&env.current_contract_address(), &m.player1, &stake_i128(&m));
+        client.transfer(&env.current_contract_address(), &m.player2, &stake_i128(&m));
 
         m.state = MatchState::Cancelled;
         m.cancelled_ledger = Some(current);
@@ -632,10 +701,11 @@ impl EscrowContract {
         if stake_amount == 0 {
             return Err(Error::InvalidStakeAmount);
         }
-        if stake_amount < MIN_STAKE {
+        let limits = Self::stake_limits(&env);
+        if stake_amount < limits.min {
             return Err(Error::StakeTooLow);
         }
-        if stake_amount > MAX_STAKE {
+        if stake_amount > limits.max {
             return Err(Error::StakeTooHigh);
         }
         if player1 == player2 {
@@ -659,6 +729,11 @@ impl EscrowContract {
         // lookup key used by the oracle.
         if !Self::is_valid_game_id(&game_id) {
             return Err(Error::InvalidGameId);
+        }
+        // Platform-specific format (#2062): a well-formed ID the platform could
+        // never issue would leave the oracle unable to settle the match.
+        if !Self::game_id_matches_platform(&game_id, &platform) {
+            return Err(Error::InvalidGameIdFormat);
         }
         if env
             .storage()
@@ -710,7 +785,8 @@ impl EscrowContract {
             id,
             player1,
             player2,
-            stake_amount,
+            // Validated positive and <= MAX_STAKE above, so this is lossless.
+            stake_amount: stake_amount as u128,
             token,
             game_id,
             platform,
@@ -723,6 +799,9 @@ impl EscrowContract {
             pending_winner: OptionalWinner::None,
             cancelled_ledger: None,
             completed_ledger: None,
+            player1_deposited_at: None,
+            player2_deposited_at: None,
+            first_depositor: None,
         };
 
         Self::store_match(&env, &m);
@@ -776,6 +855,11 @@ impl EscrowContract {
         if !is_p1 && !is_p2 {
             return Err(Error::Unauthorized);
         }
+        let player_label = if is_p1 {
+            symbol_short!("player1")
+        } else {
+            symbol_short!("player2")
+        };
 
         let already_deposited = if is_p1 {
             m.player1_deposited
@@ -789,19 +873,38 @@ impl EscrowContract {
 
         let client = token::Client::new(&env, &m.token);
         let allowance = client.allowance(&player, &env.current_contract_address());
-        if allowance < m.stake_amount {
+        if allowance < stake_i128(&m) {
             return Err(Error::InsufficientAllowance);
         }
         client
-            .try_transfer(&player, &env.current_contract_address(), &m.stake_amount)
+            .try_transfer(&player, &env.current_contract_address(), &stake_i128(&m))
             .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
 
+        // Record when each deposit landed and which came first (#2060).
+        let now = env.ledger().timestamp();
+        let is_first = !m.player1_deposited && !m.player2_deposited;
         if is_p1 {
             m.player1_deposited = true;
+            m.player1_deposited_at = Some(now);
         } else {
             m.player2_deposited = true;
+            m.player2_deposited_at = Some(now);
         }
+        if is_first {
+            m.first_depositor = Some(player.clone());
+        }
+        // Audit log: order (1 or 2), ledger time and sequence of this deposit.
+        env.events().publish(
+            (Symbol::new(&env, "match"), symbol_short!("dep_order")),
+            (
+                match_id,
+                player.clone(),
+                if is_first { 1u32 } else { 2u32 },
+                now,
+                env.ledger().sequence(),
+            ),
+        );
 
         // Check if exactly one player has now deposited (half-funded state)
         let one_deposited = (m.player1_deposited as u8) + (m.player2_deposited as u8) == 1;
@@ -1081,8 +1184,8 @@ impl EscrowContract {
         let client = token::Client::new(&env, &m.token);
 
         let payout_amount: i128 = match &winner {
-            Winner::Draw => m.stake_amount,
-            _ => m.stake_amount * 2,
+            Winner::Draw => stake_i128(&m),
+            _ => stake_i128(&m) * 2,
         };
 
         let total_payout = match &winner {
@@ -1206,21 +1309,21 @@ impl EscrowContract {
         }
 
         let client = token::Client::new(&env, &m.token);
-        let player1_refund: i128 = if m.player1_deposited { m.stake_amount } else { 0 };
-        let player2_refund: i128 = if m.player2_deposited { m.stake_amount } else { 0 };
+        let player1_refund: i128 = if m.player1_deposited { stake_i128(&m) } else { 0 };
+        let player2_refund: i128 = if m.player2_deposited { stake_i128(&m) } else { 0 };
         let refund_total = player1_refund + player2_refund;
         if refund_total > 0 {
             Self::ensure_reserve_for_payout(&env, &m.token, refund_total)?;
         }
         if m.player1_deposited {
             client
-                .try_transfer(&env.current_contract_address(), &m.player1, &m.stake_amount)
+                .try_transfer(&env.current_contract_address(), &m.player1, &stake_i128(&m))
                 .map_err(|_| Error::TransferFailed)?
                 .map_err(|_| Error::TransferFailed)?;
         }
         if m.player2_deposited {
             client
-                .try_transfer(&env.current_contract_address(), &m.player2, &m.stake_amount)
+                .try_transfer(&env.current_contract_address(), &m.player2, &stake_i128(&m))
                 .map_err(|_| Error::TransferFailed)?
                 .map_err(|_| Error::TransferFailed)?;
         }
@@ -1304,7 +1407,7 @@ impl EscrowContract {
         let pending = PendingDrain {
             initiator: caller.clone(),
             amount,
-            expires_at,
+            expiry_ledger: expires_at,
         };
         env.storage()
             .instance()
@@ -1344,7 +1447,7 @@ impl EscrowContract {
         if caller == pending.initiator {
             return Err(Error::Unauthorized);
         }
-        if env.ledger().sequence() > pending.expires_at {
+        if env.ledger().sequence() > pending.expiry_ledger {
             env.storage().instance().remove(&DataKey::PendingDrain);
             return Err(Error::DrainApprovalExpired);
         }
@@ -1779,3 +1882,13 @@ impl EscrowContract {
         Ok(())
     }
 }
+
+/// A match's stake as the `i128` token amounts use. `Match::stake_amount` is
+/// stored as `u128` but validated to `MIN_STAKE..=MAX_STAKE` at creation, far
+/// below `i128::MAX`, so the conversion is lossless.
+fn stake_i128(m: &Match) -> i128 {
+    m.stake_amount as i128
+}
+
+#[cfg(test)]
+mod tests_stake_rules;

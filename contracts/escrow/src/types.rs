@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, String};
+use soroban_sdk::{contracttype, Address, BytesN, String};
 
 /// Represents the lifecycle state of a chess match held in escrow.
 ///
@@ -91,6 +91,11 @@ pub enum MatchState {
     /// `cancel_match`) or timed out from the [`Active`](MatchState::Active)
     /// state (via `enforce_timeout`).
     Cancelled,
+
+    /// The result is final but at least one payout transfer failed (#2066).
+    /// The funds are still held by the escrow; `retry_payout` finishes the
+    /// payout and moves the match to `Completed`.
+    PayoutFailed,
 }
 
 /// The chess platform on which the game is being played.
@@ -294,6 +299,26 @@ pub struct Match {
     /// [`finalize_result`](crate::EscrowContract::finalize_result) when the match
     /// transitions to [`MatchState::Completed`]. `None` for all other states.
     pub completed_ledger: Option<u32>,
+
+    /// Ledger timestamp (seconds) of player 1's deposit, once made (#2060).
+    pub player1_deposited_at: Option<u64>,
+
+    /// Ledger timestamp (seconds) of player 2's deposit, once made (#2060).
+    pub player2_deposited_at: Option<u64>,
+
+    /// The player who deposited first. Deposits may arrive in either order;
+    /// this records which one actually came first (#2060).
+    pub first_depositor: Option<Address>,
+}
+
+/// The admin-configured stake range for new matches (#2059), in the token's
+/// smallest unit. Defaults to [`MIN_STAKE`](crate::constants::MIN_STAKE) ..=
+/// [`MAX_STAKE`](crate::constants::MAX_STAKE) until an admin sets it.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StakeLimits {
+    pub min: i128,
+    pub max: i128,
 }
 
 /// Administrative roles recognised by the contract.
@@ -301,7 +326,7 @@ pub struct Match {
 /// Access control is role-based: each role is granted a fixed set of
 /// [`Permission`]s, and privileged entry points check that the caller holds
 /// the role required for the operation. Role assignments are stored under
-/// [`DataKey::RoleAssignment`] and are managed exclusively by the
+/// [`DataKey::Role`] and are managed exclusively by the
 /// [`Primary`](Role::Primary) admin.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -425,7 +450,7 @@ pub struct PendingDrain {
 /// | `DisputeWindowLedgers`     | Instance     | Configurable dispute window duration in ledgers |
 /// | `TimeoutLedgers`           | Instance     | Configurable match timeout duration in ledgers |
 /// | `GameId(String)`           | Persistent   | Deduplication index: game_id → match ID      |
-/// | `RoleAssignment(Role)`     | Instance     | Address holding the given administrative role |
+/// | `Role(Address)`            | Persistent   | The [`Role`] assigned to an address            |
 /// | `PendingDrain`             | Instance     | Armed two-phase emergency drain awaiting confirmation |
 ///
 /// Instance-tier keys share the contract's instance TTL. Persistent-tier keys
@@ -546,6 +571,41 @@ pub enum DataKey {
 
     /// Total count of evidence records submitted for a given match.
     DisputeEvidenceCount(u64),
+
+    /// The [`AdminRole`] assigned to an address by the primary admin.
+    Role(Address),
+
+    /// The emergency drain awaiting second-signer confirmation, if any.
+    PendingDrain,
+
+    /// The admin-configured [`StakeLimits`] (#2059).
+    StakeLimits,
+
+    /// The [`PayoutRecord`] of a match whose payout failed (#2066).
+    Payout(u64),
+}
+
+/// The name `lib.rs` uses for [`Role`].
+pub type AdminRole = Role;
+
+impl Role {
+    /// Whether this role grants `permission` (see the table on [`Permission`]).
+    pub fn has_permission(&self, permission: Permission) -> bool {
+        match self {
+            Role::Primary => true,
+            Role::Secondary => matches!(
+                permission,
+                Permission::Pause
+                    | Permission::Unpause
+                    | Permission::OracleRotation
+                    | Permission::TokenManagement
+            ),
+            Role::Emergency => matches!(
+                permission,
+                Permission::DrainInitiate | Permission::DrainConfirm
+            ),
+        }
+    }
 }
 
 /// An immutable evidence record submitted in connection with a match dispute.
@@ -557,3 +617,21 @@ pub struct DisputeEvidenceRecord {
     pub timestamp_ledger: u32,
 }
 
+/// Who is owed what for a finalized match, and what has been paid (#2066).
+///
+/// Written when a payout transfer fails, so a retry pays only what is still
+/// outstanding and never pays anyone twice.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PayoutRecord {
+    pub player1_amount: i128,
+    pub player2_amount: i128,
+    pub player1_paid: bool,
+    pub player2_paid: bool,
+    /// Payout attempts so far, including the first one in `finalize_result`.
+    pub attempts: u32,
+    /// Ledger timestamp of the first failed attempt.
+    pub first_failed_at: u64,
+    /// Ledger timestamp of the latest attempt.
+    pub last_attempt_at: u64,
+}

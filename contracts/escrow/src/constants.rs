@@ -104,3 +104,12 @@ pub const DRAIN_APPROVAL_WINDOW_LEDGERS: u32 = LEDGERS_PER_DAY;
 /// amount scaling overflow-prone, so tokens reporting more are rejected at
 /// registration time.
 pub const MAX_TOKEN_DECIMALS: u32 = 18;
+
+/// Length of a Lichess game ID (8 alphanumeric characters), #2062.
+pub const LICHESS_GAME_ID_LEN: usize = 8;
+
+/// Longest Chess.com game ID accepted (numeric, no leading zero), #2062.
+pub const CHESSCOM_GAME_ID_MAX_LEN: usize = 20;
+
+/// Longest pause/unpause reason accepted, in bytes (#2061).
+pub const MAX_PAUSE_REASON_LEN: u32 = 256;

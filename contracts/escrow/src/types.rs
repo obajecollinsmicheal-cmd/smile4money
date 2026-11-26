@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, String};
+use soroban_sdk::{contracttype, Address, BytesN, String, Symbol};
 
 /// Represents the lifecycle state of a chess match held in escrow.
 ///
@@ -600,6 +600,12 @@ pub enum DataKey {
     /// Dispute window for draw results, in ledgers (#2076).
     DrawDisputeWindowLedgers,
 
+    /// Number of [`AdminAuditEntry`]s recorded (#2078).
+    AdminAuditLen,
+
+    /// The `n`th admin audit entry, written once (#2078).
+    AdminAudit(u32),
+
     /// Number of [`PayoutEntry`]s recorded for an address (#2068).
     PayoutHistoryLen(Address),
 
@@ -714,4 +720,20 @@ pub struct OutcomeStats {
     pub player1_wins: u64,
     pub player2_wins: u64,
     pub draws: u64,
+}
+
+/// One administrative action, recorded when it is performed (#2078).
+/// Entries are append-only: written once at the next index, never changed.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AdminAuditEntry {
+    /// Short action name, e.g. `pause`, `oracle`, `role_set`, `drn_init`.
+    pub action: Symbol,
+    /// The address that authorised the action.
+    pub caller: Address,
+    /// Ledger sequence (height) and timestamp of the action.
+    pub ledger: u32,
+    pub timestamp: u64,
+    /// The action's parameters, in the entry point's argument order.
+    pub params: soroban_sdk::Vec<soroban_sdk::Val>,
 }

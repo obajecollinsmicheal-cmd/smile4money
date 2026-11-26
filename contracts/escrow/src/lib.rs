@@ -66,7 +66,10 @@ mod types;
 pub use constants::*;
 
 use errors::Error;
-use soroban_sdk::{contract, contractimpl, symbol_short, token, vec, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, token, vec, Address, BytesN, Env, IntoVal, String, Symbol,
+    Val, Vec,
+};
 
 /// Topic symbol for the event emitted when the contract is paused.
 const CONTRACT_PAUSED: Symbol = symbol_short!("paused");
@@ -74,7 +77,7 @@ const CONTRACT_PAUSED: Symbol = symbol_short!("paused");
 const CONTRACT_UNPAUSED: Symbol = symbol_short!("unpaused");
 use types::{
     AdminRole, DataKey, DisputeEvidenceRecord, Match, MatchState, OptionalWinner, PendingDrain,
-    FeeConfig, FeePolicy, OutcomeStats, PayoutEntry, PayoutRecord, Permission, Platform,
+    AdminAuditEntry, FeeConfig, FeePolicy, OutcomeStats, PayoutEntry, PayoutRecord, Permission, Platform,
     StakeLimits, Winner,
 };
 
@@ -137,6 +140,7 @@ impl EscrowContract {
     pub fn set_stake_limits(env: Env, caller: Address, min: i128, max: i128) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::TokenManagement)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("stk_lim"), &caller, vec![&env, min.into_val(&env), max.into_val(&env)]);
         if min <= 0 || min > max || max > MAX_STAKE {
             return Err(Error::InvalidStakeLimits);
         }
@@ -171,6 +175,7 @@ impl EscrowContract {
     ) -> Result<(), Error> {
         Self::require_primary_admin(&env, &caller)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("role_set"), &caller, vec![&env, account.clone().into_val(&env), role.into_val(&env)]);
 
         env.storage()
             .persistent()
@@ -193,6 +198,7 @@ impl EscrowContract {
     pub fn revoke_role(env: Env, caller: Address, account: Address) -> Result<(), Error> {
         Self::require_primary_admin(&env, &caller)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("role_rev"), &caller, vec![&env, account.clone().into_val(&env)]);
 
         env.storage()
             .persistent()
@@ -256,6 +262,7 @@ impl EscrowContract {
     pub fn pause(env: Env, caller: Address, reason: String) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::Pause)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("pause"), &caller, vec![&env, reason.clone().into_val(&env)]);
         Self::check_pause_reason(&reason)?;
         if Self::is_paused(&env) {
             return Ok(());
@@ -284,6 +291,7 @@ impl EscrowContract {
     pub fn unpause(env: Env, caller: Address, reason: String) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::Unpause)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("unpause"), &caller, vec![&env, reason.clone().into_val(&env)]);
         Self::check_pause_reason(&reason)?;
         if !Self::is_paused(&env) {
             return Ok(());
@@ -619,21 +627,93 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::TimeoutLedgers, &timeout);
 
+        // #2078: the first audit entry; #2079: safe_address is set here only.
+        Self::audit(
+            &env,
+            symbol_short!("init"),
+            &admin,
+            vec![
+                &env,
+                oracle.into_val(&env),
+                token.into_val(&env),
+                safe_address.into_val(&env),
+            ],
+        );
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
+    /// Append an admin action to the audit trail and emit it (#2078).
+    fn audit(env: &Env, action: Symbol, caller: &Address, params: Vec<Val>) {
+        let storage = env.storage().persistent();
+        let n: u32 = storage.get(&DataKey::AdminAuditLen).unwrap_or(0);
+        let ledger = env.ledger().sequence();
+        let timestamp = env.ledger().timestamp();
+        let key = DataKey::AdminAudit(n);
+        storage.set(
+            &key,
+            &AdminAuditEntry {
+                action: action.clone(),
+                caller: caller.clone(),
+                ledger,
+                timestamp,
+                params: params.clone(),
+            },
+        );
+        storage.set(&DataKey::AdminAuditLen, &(n + 1));
+        storage.extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        storage.extend_ttl(&DataKey::AdminAuditLen, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        env.events().publish(
+            (symbol_short!("audit"), action, caller.clone()),
+            (n, ledger, timestamp, params),
+        );
+    }
+
+    /// Number of admin actions recorded (#2078).
+    pub fn get_admin_audit_len(env: Env) -> u32 {
+        env.storage().persistent().get(&DataKey::AdminAuditLen).unwrap_or(0)
+    }
+
+    /// Up to `limit` (max 50) audit entries from index `start`, oldest first (#2078).
+    pub fn get_admin_audit(env: Env, start: u32, limit: u32) -> Vec<AdminAuditEntry> {
+        let len = Self::get_admin_audit_len(env.clone());
+        let end = start.saturating_add(limit.min(50)).min(len);
+        let mut out = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            if let Some(e) = env.storage().persistent().get(&DataKey::AdminAudit(i)) {
+                out.push_back(e);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The emergency drain destination (#2079). Set once by `initialize`;
+    /// no entry point can change it, and drains only ever pay it.
+    pub fn get_safe_address(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SafeAddress)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Rotate the oracle address — requires [`Permission::OracleRotation`].
     pub fn update_oracle(env: Env, caller: Address, new_oracle: Address) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::OracleRotation)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("oracle"), &caller, vec![&env, new_oracle.clone().into_val(&env)]);
         let old_oracle: Address = env
             .storage()
             .instance()
             .get(&DataKey::Oracle)
             .ok_or(Error::Unauthorized)?;
+        // #2077: a rotation must actually replace the key.
+        if new_oracle == old_oracle {
+            return Err(Error::InvalidAddress);
+        }
         env.storage().instance().set(&DataKey::Oracle, &new_oracle);
         Self::bump_instance_ttl(&env);
         env.events().publish(
@@ -658,6 +738,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("adm_xfer"), &caller, vec![&env, new_admin.clone().into_val(&env)]);
 
         if is_zero_address(&env, &new_admin) || new_admin == current_admin {
             return Err(Error::InvalidAdmin);
@@ -1089,6 +1170,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("override"), &caller, vec![&env, match_id.into_val(&env), new_winner.clone().into_val(&env)]);
 
         Self::validate_match_id(&env, match_id)?;
 
@@ -1207,6 +1289,12 @@ impl EscrowContract {
         // #2067: fix the fee for each payout now, so a later config change
         // can't alter a match already being paid.
         let fees = Self::fee_config(&env);
+        // #2074: both sides of a draw must also net the same amount.
+        if winner == Winner::Draw
+            && player_fee_share(&fees, player1_amount) != player_fee_share(&fees, player2_amount)
+        {
+            return Err(Error::PayoutMismatch);
+        }
         let mut record = PayoutRecord {
             player1_amount,
             player2_amount,
@@ -1404,6 +1492,7 @@ impl EscrowContract {
     ) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::TokenManagement)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("fee_cfg"), &caller, vec![&env, fee_per_payout.into_val(&env), policy.into_val(&env), collector.clone().into_val(&env)]);
         if !(0..=MAX_STAKE).contains(&fee_per_payout) {
             // The error enum is at Soroban's 50-variant limit, so reuse InvalidAmount.
             return Err(Error::InvalidAmount);
@@ -1661,6 +1750,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("draw_win"), &caller, vec![&env, ledgers.into_val(&env)]);
         if ledgers == 0 || ledgers > LEDGERS_PER_WEEK {
             return Err(Error::InvalidAmount);
         }
@@ -1877,6 +1967,7 @@ impl EscrowContract {
     pub fn initiate_drain(env: Env, caller: Address, amount: i128) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::DrainInitiate)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("drn_init"), &caller, vec![&env, amount.into_val(&env)]);
 
         if !Self::is_paused(&env) {
             return Err(Error::NotPaused);
@@ -1943,6 +2034,7 @@ impl EscrowContract {
     pub fn confirm_drain(env: Env, caller: Address) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::DrainConfirm)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("drn_conf"), &caller, Vec::new(&env));
 
         let pending: PendingDrain = env
             .storage()
@@ -2251,6 +2343,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("arbiter"), &caller, vec![&env, arbiter.clone().into_val(&env)]);
         env.storage().instance().set(&DataKey::Arbiter, &arbiter);
         env.events().publish((Symbol::new(&env, "arbiter_updated"),), arbiter);
         Ok(())
@@ -2376,6 +2469,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("resolve"), &caller, vec![&env, match_id.into_val(&env), winner.clone().into_val(&env)]);
 
         if m.state != MatchState::Contested {
             return Err(Error::NotContested);
@@ -2413,12 +2507,24 @@ fn payout_amounts(winner: &Winner, stake: i128) -> (i128, i128) {
 /// the discrepancy is logged as a diagnostic (visible in simulation and in
 /// the failed transaction's diagnostics) rather than as a contract event.
 fn validate_payout(winner: &Winner, stake: i128, player1: i128, player2: i128) -> Result<(), Error> {
+    if *winner == Winner::Draw {
+        validate_draw(stake, player1, player2)?;
+    }
     let expected = match winner {
         Winner::Player1 => (stake * 2, 0),
         Winner::Player2 => (0, stake * 2),
         Winner::Draw => (stake, stake),
     };
     if stake <= 0 || (player1, player2) != expected || player1 + player2 != stake * 2 {
+        return Err(Error::PayoutMismatch);
+    }
+    Ok(())
+}
+
+/// A draw must refund both players identically, exactly their stake, with
+/// no winner bonus (#2074). Checked before any state change or transfer.
+fn validate_draw(stake: i128, player1: i128, player2: i128) -> Result<(), Error> {
+    if stake <= 0 || player1 != player2 || player1 != stake {
         return Err(Error::PayoutMismatch);
     }
     Ok(())
@@ -2480,3 +2586,6 @@ mod tests_fees_history;
 
 #[cfg(test)]
 mod tests_draws_decimals;
+
+#[cfg(test)]
+mod tests_admin_audit;

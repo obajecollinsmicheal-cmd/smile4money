@@ -66,22 +66,29 @@ mod types;
 pub use constants::*;
 
 use errors::Error;
-use soroban_sdk::{contract, contractimpl, symbol_short, token, vec, Address, BytesN, Env, String, Symbol, TryFromVal, Vec};
+use soroban_sdk::{
+    contract, contractimpl, symbol_short, token, vec, Address, BytesN, Env, IntoVal, String, Symbol,
+    Val, Vec,
+};
 
 /// Topic symbol for the event emitted when the contract is paused.
 const CONTRACT_PAUSED: Symbol = symbol_short!("paused");
 /// Topic symbol for the event emitted when the contract is unpaused.
 const CONTRACT_UNPAUSED: Symbol = symbol_short!("unpaused");
-use types::{DataKey, DisputeEvidenceRecord, Match, MatchState, OptionalWinner, Platform, Winner};
+use types::{
+    AdminRole, DataKey, DisputeEvidenceRecord, Match, MatchState, OptionalWinner, PendingDrain,
+    AdminAuditEntry, FeeConfig, FeePolicy, OutcomeStats, PayoutEntry, PayoutRecord, Permission, Platform,
+    StakeLimits, Winner,
+};
 
 fn is_zero_address(env: &Env, addr: &Address) -> bool {
-    // The all-zeros Stellar account key encodes to this strkey.
-    // We construct the Address via the ScAddress XDR path since
-    // TryFromVal<Env, String> is not implemented for Address.
-    use soroban_sdk::xdr::{AccountId, PublicKey, ScAddress, Uint256};
-    let zero_key = Uint256([0u8; 32]);
-    let sc_addr = ScAddress::Account(AccountId(PublicKey::PublicKeyTypeEd25519(zero_key)));
-    let zero_address = Address::try_from_val(env, &sc_addr).expect("invalid zero address");
+    // The all-zeros ed25519 account key as a strkey. Built from the string
+    // because the XDR `ScAddress` conversion is host-only and doesn't exist in
+    // the wasm build.
+    let zero_address = Address::from_str(
+        env,
+        "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+    );
     addr == &zero_address
 }
 
@@ -119,6 +126,35 @@ impl EscrowContract {
             .ok_or(Error::NotInitialized)
     }
 
+    /// The stake range (inclusive, smallest token unit) new matches must fall in.
+    pub fn get_stake_limits(env: Env) -> StakeLimits {
+        Self::stake_limits(&env)
+    }
+
+    /// Set the stake range for new matches (#2059). Requires
+    /// [`Permission::TokenManagement`] (primary or secondary admin).
+    ///
+    /// `min` and `max` are inclusive and must satisfy
+    /// `0 < min <= max <= MAX_STAKE`; `MAX_STAKE` is a hard ceiling so payouts
+    /// can't overflow. Existing matches keep the stake they were created with.
+    pub fn set_stake_limits(env: Env, caller: Address, min: i128, max: i128) -> Result<(), Error> {
+        Self::require_permission(&env, &caller, Permission::TokenManagement)?;
+        caller.require_auth();
+        Self::audit(&env, symbol_short!("stk_lim"), &caller, vec![&env, min.into_val(&env), max.into_val(&env)]);
+        if min <= 0 || min > max || max > MAX_STAKE {
+            return Err(Error::InvalidStakeLimits);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::StakeLimits, &StakeLimits { min, max });
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("stk_lim")),
+            (caller, min, max),
+        );
+        Ok(())
+    }
+
     /// Return the role assigned to `account`, or `None` if it holds no role.
     pub fn get_role(env: Env, account: Address) -> Option<AdminRole> {
         env.storage()
@@ -139,6 +175,7 @@ impl EscrowContract {
     ) -> Result<(), Error> {
         Self::require_primary_admin(&env, &caller)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("role_set"), &caller, vec![&env, account.clone().into_val(&env), role.into_val(&env)]);
 
         env.storage()
             .persistent()
@@ -161,6 +198,7 @@ impl EscrowContract {
     pub fn revoke_role(env: Env, caller: Address, account: Address) -> Result<(), Error> {
         Self::require_primary_admin(&env, &caller)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("role_rev"), &caller, vec![&env, account.clone().into_val(&env)]);
 
         env.storage()
             .persistent()
@@ -217,12 +255,15 @@ impl EscrowContract {
     /// Pause the contract, blocking new match creation and deposits while
     /// allowing in-flight matches to settle.
     ///
-    /// Requires [`Permission::Pause`]. Emits a `ContractPaused` event carrying the
-    /// admin address and the current ledger sequence number so the action can be
-    /// detected and audited on-chain.
-    pub fn pause(env: Env, caller: Address) -> Result<(), Error> {
+    /// Requires [`Permission::Pause`] and a `reason` of 1-256 bytes (#2061).
+    ///
+    /// Emits `("paused", admin)` with data `(reason, timestamp, ledger)`. The
+    /// admin address is a topic, so indexers can filter pause events by admin.
+    pub fn pause(env: Env, caller: Address, reason: String) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::Pause)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("pause"), &caller, vec![&env, reason.clone().into_val(&env)]);
+        Self::check_pause_reason(&reason)?;
         if Self::is_paused(&env) {
             return Ok(());
         }
@@ -230,19 +271,28 @@ impl EscrowContract {
         Self::bump_instance_ttl(&env);
         env.events().publish(
             (CONTRACT_PAUSED, caller.clone()),
-            env.ledger().sequence(),
+            (reason, env.ledger().timestamp(), env.ledger().sequence()),
         );
+        Ok(())
+    }
+
+    fn check_pause_reason(reason: &String) -> Result<(), Error> {
+        if reason.len() == 0 || reason.len() > MAX_PAUSE_REASON_LEN {
+            return Err(Error::InvalidPauseReason);
+        }
         Ok(())
     }
 
     /// Unpause the contract, re-enabling normal operation.
     ///
-    /// Requires [`Permission::Unpause`]. Emits a `ContractUnpaused` event carrying
-    /// the admin address and the current ledger sequence number so the action can
-    /// be detected and audited on-chain.
-    pub fn unpause(env: Env, caller: Address) -> Result<(), Error> {
+    /// Requires [`Permission::Unpause`] and a `reason` of 1-256 bytes (#2061).
+    ///
+    /// Emits `("unpaused", admin)` with data `(reason, timestamp, ledger)`.
+    pub fn unpause(env: Env, caller: Address, reason: String) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::Unpause)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("unpause"), &caller, vec![&env, reason.clone().into_val(&env)]);
+        Self::check_pause_reason(&reason)?;
         if !Self::is_paused(&env) {
             return Ok(());
         }
@@ -250,7 +300,7 @@ impl EscrowContract {
         Self::bump_instance_ttl(&env);
         env.events().publish(
             (CONTRACT_UNPAUSED, caller.clone()),
-            env.ledger().sequence(),
+            (reason, env.ledger().timestamp(), env.ledger().sequence()),
         );
         Ok(())
     }
@@ -320,6 +370,44 @@ impl EscrowContract {
     ///
     /// The string is copied into a fixed 64-byte stack buffer — the same size as
     /// `MAX_GAME_ID_LEN` — so no heap allocation is required inside the WASM guest.
+    /// Whether `game_id` has the format `platform` issues (#2062).
+    ///
+    /// * Lichess: exactly 8 ASCII alphanumeric characters (e.g. `q7ZvsdUF`).
+    /// * Chess.com: the numeric game ID, 1-20 digits with no leading zero
+    ///   (e.g. `98765432101`).
+    ///
+    /// Assumes the generic length check has already passed.
+    fn game_id_matches_platform(game_id: &soroban_sdk::String, platform: &Platform) -> bool {
+        let len = game_id.len() as usize;
+        if len > MAX_GAME_ID_LEN as usize {
+            return false;
+        }
+        let mut buf = [0u8; MAX_GAME_ID_LEN as usize];
+        game_id.copy_into_slice(&mut buf[..len]);
+        let id = &buf[..len];
+        match platform {
+            Platform::Lichess => {
+                len == LICHESS_GAME_ID_LEN && id.iter().all(|b| b.is_ascii_alphanumeric())
+            }
+            Platform::ChessDotCom => {
+                (1..=CHESSCOM_GAME_ID_MAX_LEN).contains(&len)
+                    && id[0] != b'0'
+                    && id.iter().all(|b| b.is_ascii_digit())
+            }
+        }
+    }
+
+    /// The stake range applied to new matches (#2059).
+    fn stake_limits(env: &Env) -> StakeLimits {
+        env.storage()
+            .instance()
+            .get(&DataKey::StakeLimits)
+            .unwrap_or(StakeLimits {
+                min: MIN_STAKE,
+                max: MAX_STAKE,
+            })
+    }
+
     fn is_valid_game_id(game_id: &soroban_sdk::String) -> bool {
         let len = game_id.len() as usize;
         // Safety: len is already validated to be in [1, MAX_GAME_ID_LEN].
@@ -437,8 +525,8 @@ impl EscrowContract {
         let client = token::Client::new(env, &m.token);
         let refund_total = m.stake_amount * 2;
         Self::ensure_reserve_for_payout(env, &m.token, refund_total as i128)?;
-        client.transfer(&env.current_contract_address(), &m.player1, m.stake_amount as i128);
-        client.transfer(&env.current_contract_address(), &m.player2, m.stake_amount as i128);
+        client.transfer(&env.current_contract_address(), &m.player1, &stake_i128(&m));
+        client.transfer(&env.current_contract_address(), &m.player2, &stake_i128(&m));
 
         m.state = MatchState::Cancelled;
         m.cancelled_ledger = Some(current);
@@ -539,21 +627,93 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::TimeoutLedgers, &timeout);
 
+        // #2078: the first audit entry; #2079: safe_address is set here only.
+        Self::audit(
+            &env,
+            symbol_short!("init"),
+            &admin,
+            vec![
+                &env,
+                oracle.into_val(&env),
+                token.into_val(&env),
+                safe_address.into_val(&env),
+            ],
+        );
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
+    /// Append an admin action to the audit trail and emit it (#2078).
+    fn audit(env: &Env, action: Symbol, caller: &Address, params: Vec<Val>) {
+        let storage = env.storage().persistent();
+        let n: u32 = storage.get(&DataKey::AdminAuditLen).unwrap_or(0);
+        let ledger = env.ledger().sequence();
+        let timestamp = env.ledger().timestamp();
+        let key = DataKey::AdminAudit(n);
+        storage.set(
+            &key,
+            &AdminAuditEntry {
+                action: action.clone(),
+                caller: caller.clone(),
+                ledger,
+                timestamp,
+                params: params.clone(),
+            },
+        );
+        storage.set(&DataKey::AdminAuditLen, &(n + 1));
+        storage.extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        storage.extend_ttl(&DataKey::AdminAuditLen, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        env.events().publish(
+            (symbol_short!("audit"), action, caller.clone()),
+            (n, ledger, timestamp, params),
+        );
+    }
+
+    /// Number of admin actions recorded (#2078).
+    pub fn get_admin_audit_len(env: Env) -> u32 {
+        env.storage().persistent().get(&DataKey::AdminAuditLen).unwrap_or(0)
+    }
+
+    /// Up to `limit` (max 50) audit entries from index `start`, oldest first (#2078).
+    pub fn get_admin_audit(env: Env, start: u32, limit: u32) -> Vec<AdminAuditEntry> {
+        let len = Self::get_admin_audit_len(env.clone());
+        let end = start.saturating_add(limit.min(50)).min(len);
+        let mut out = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            if let Some(e) = env.storage().persistent().get(&DataKey::AdminAudit(i)) {
+                out.push_back(e);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// The emergency drain destination (#2079). Set once by `initialize`;
+    /// no entry point can change it, and drains only ever pay it.
+    pub fn get_safe_address(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::SafeAddress)
+            .ok_or(Error::NotInitialized)
+    }
+
     /// Rotate the oracle address — requires [`Permission::OracleRotation`].
     pub fn update_oracle(env: Env, caller: Address, new_oracle: Address) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::OracleRotation)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("oracle"), &caller, vec![&env, new_oracle.clone().into_val(&env)]);
         let old_oracle: Address = env
             .storage()
             .instance()
             .get(&DataKey::Oracle)
             .ok_or(Error::Unauthorized)?;
+        // #2077: a rotation must actually replace the key.
+        if new_oracle == old_oracle {
+            return Err(Error::InvalidAddress);
+        }
         env.storage().instance().set(&DataKey::Oracle, &new_oracle);
         Self::bump_instance_ttl(&env);
         env.events().publish(
@@ -578,6 +738,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("adm_xfer"), &caller, vec![&env, new_admin.clone().into_val(&env)]);
 
         if is_zero_address(&env, &new_admin) || new_admin == current_admin {
             return Err(Error::InvalidAdmin);
@@ -632,10 +793,11 @@ impl EscrowContract {
         if stake_amount == 0 {
             return Err(Error::InvalidStakeAmount);
         }
-        if stake_amount < MIN_STAKE {
+        let limits = Self::stake_limits(&env);
+        if stake_amount < limits.min {
             return Err(Error::StakeTooLow);
         }
-        if stake_amount > MAX_STAKE {
+        if stake_amount > limits.max {
             return Err(Error::StakeTooHigh);
         }
         if player1 == player2 {
@@ -659,6 +821,11 @@ impl EscrowContract {
         // lookup key used by the oracle.
         if !Self::is_valid_game_id(&game_id) {
             return Err(Error::InvalidGameId);
+        }
+        // Platform-specific format (#2062): a well-formed ID the platform could
+        // never issue would leave the oracle unable to settle the match.
+        if !Self::game_id_matches_platform(&game_id, &platform) {
+            return Err(Error::InvalidGameIdFormat);
         }
         if env
             .storage()
@@ -691,6 +858,9 @@ impl EscrowContract {
             return Err(Error::TokenNotAllowlisted);
         }
 
+        // #2072: record the token's precision; the stake is in its units.
+        let token_decimals = Self::read_decimals(&env, &token)?;
+
         let id: u64 = env
             .storage()
             .instance()
@@ -710,7 +880,8 @@ impl EscrowContract {
             id,
             player1,
             player2,
-            stake_amount,
+            // Validated positive and <= MAX_STAKE above, so this is lossless.
+            stake_amount: stake_amount as u128,
             token,
             game_id,
             platform,
@@ -723,6 +894,10 @@ impl EscrowContract {
             pending_winner: OptionalWinner::None,
             cancelled_ledger: None,
             completed_ledger: None,
+            player1_deposited_at: None,
+            player2_deposited_at: None,
+            first_depositor: None,
+            token_decimals,
         };
 
         Self::store_match(&env, &m);
@@ -766,16 +941,17 @@ impl EscrowContract {
         if m.state == MatchState::Completed {
             return Err(Error::MatchCompleted);
         }
-        if m.state != MatchState::Pending {
-            return Err(Error::InvalidState);
-        }
-
         let is_p1 = player == m.player1;
         let is_p2 = player == m.player2;
 
         if !is_p1 && !is_p2 {
             return Err(Error::Unauthorized);
         }
+        let player_label = if is_p1 {
+            symbol_short!("player1")
+        } else {
+            symbol_short!("player2")
+        };
 
         let already_deposited = if is_p1 {
             m.player1_deposited
@@ -783,25 +959,49 @@ impl EscrowContract {
             m.player2_deposited
         };
 
+        // #2064: a player who has deposited always gets AlreadyFunded, even
+        // once the match is Active, so the error says what actually happened.
         if already_deposited {
             return Err(Error::AlreadyFunded);
+        }
+        if m.state != MatchState::Pending {
+            return Err(Error::InvalidState);
         }
 
         let client = token::Client::new(&env, &m.token);
         let allowance = client.allowance(&player, &env.current_contract_address());
-        if allowance < m.stake_amount {
+        if allowance < stake_i128(&m) {
             return Err(Error::InsufficientAllowance);
         }
         client
-            .try_transfer(&player, &env.current_contract_address(), &m.stake_amount)
+            .try_transfer(&player, &env.current_contract_address(), &stake_i128(&m))
             .map_err(|_| Error::TransferFailed)?
             .map_err(|_| Error::TransferFailed)?;
 
+        // Record when each deposit landed and which came first (#2060).
+        let now = env.ledger().timestamp();
+        let is_first = !m.player1_deposited && !m.player2_deposited;
         if is_p1 {
             m.player1_deposited = true;
+            m.player1_deposited_at = Some(now);
         } else {
             m.player2_deposited = true;
+            m.player2_deposited_at = Some(now);
         }
+        if is_first {
+            m.first_depositor = Some(player.clone());
+        }
+        // Audit log: order (1 or 2), ledger time and sequence of this deposit.
+        env.events().publish(
+            (Symbol::new(&env, "match"), symbol_short!("dep_order")),
+            (
+                match_id,
+                player.clone(),
+                if is_first { 1u32 } else { 2u32 },
+                now,
+                env.ledger().sequence(),
+            ),
+        );
 
         // Check if exactly one player has now deposited (half-funded state)
         let one_deposited = (m.player1_deposited as u8) + (m.player2_deposited as u8) == 1;
@@ -970,6 +1170,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("override"), &caller, vec![&env, match_id.into_val(&env), new_winner.clone().into_val(&env)]);
 
         Self::validate_match_id(&env, match_id)?;
 
@@ -1068,67 +1269,565 @@ impl EscrowContract {
             .pending_result_ledger
             .ok_or(Error::InvalidState)?;
         let current = env.ledger().sequence();
-        let dispute_window = Self::get_dispute_window_ledgers(&env);
-        if current <= prl + dispute_window {
-            return Err(Error::DisputeWindowActive);
-        }
-
         let winner = match m.pending_winner.clone() {
             OptionalWinner::Some(w) => w,
             OptionalWinner::None => return Err(Error::InvalidState),
         };
-
-        let client = token::Client::new(&env, &m.token);
-
-        let payout_amount: i128 = match &winner {
-            Winner::Draw => m.stake_amount,
-            _ => m.stake_amount * 2,
-        };
-
-        let total_payout = match &winner {
-            Winner::Draw => payout_amount * 2,
-            _ => payout_amount,
-        };
-        Self::ensure_reserve_for_payout(&env, &m.token, total_payout)?;
-
-        match &winner {
-            Winner::Player1 => {
-                client.transfer(&env.current_contract_address(), &m.player1, &payout_amount)
-            }
-            Winner::Player2 => {
-                client.transfer(&env.current_contract_address(), &m.player2, &payout_amount)
-            }
-            Winner::Draw => {
-                client.transfer(&env.current_contract_address(), &m.player1, &payout_amount);
-                client.transfer(&env.current_contract_address(), &m.player2, &payout_amount);
-            }
+        // #2076: a draw uses its own (configurable) challenge window.
+        if current <= prl + Self::window_for(&env, &winner) {
+            return Err(Error::DisputeWindowActive);
         }
 
-        // STATE TRANSITION: PendingResult → Completed
-        m.state = MatchState::Completed;
-        m.completed_ledger = Some(env.ledger().sequence());
-        Self::store_match(&env, &m);
-        Self::bump_instance_ttl(&env);
+        // #2072: express the stake in the token's current precision before
+        // computing payouts; an inexact or overflowing conversion aborts.
+        let current_decimals = Self::read_decimals(&env, &m.token)?;
+        let stake = normalize_amount(stake_i128(&m), m.token_decimals, current_decimals)?;
 
-        let (player1_amount, player2_amount) = match &winner {
-            Winner::Player1 => (m.stake_amount * 2, 0),
-            Winner::Player2 => (0, m.stake_amount * 2),
-            Winner::Draw => (m.stake_amount, m.stake_amount),
-        };
-        Self::publish_state_transition(
-            &env,
-            &m,
-            Some(MatchState::PendingResult),
-            MatchState::Completed,
+        // #2065: compute and validate the amounts before anything moves.
+        let (player1_amount, player2_amount) = payout_amounts(&winner, stake);
+        validate_payout(&winner, stake, player1_amount, player2_amount)?;
+        // #2067: fix the fee for each payout now, so a later config change
+        // can't alter a match already being paid.
+        let fees = Self::fee_config(&env);
+        // #2074: both sides of a draw must also net the same amount.
+        if winner == Winner::Draw
+            && player_fee_share(&fees, player1_amount) != player_fee_share(&fees, player2_amount)
+        {
+            return Err(Error::PayoutMismatch);
+        }
+        let mut record = PayoutRecord {
             player1_amount,
             player2_amount,
-        );
+            player1_fee: player_fee_share(&fees, player1_amount),
+            player2_fee: player_fee_share(&fees, player2_amount),
+            player1_paid: player1_amount == 0,
+            player2_paid: player2_amount == 0,
+            attempts: 0,
+            first_failed_at: 0,
+            last_attempt_at: 0,
+        };
+        // #2063: the escrow must hold the whole payout before the first
+        // transfer, so a shortfall changes nothing (see `payout_shortfall`).
+        Self::ensure_reserve_for_payout(&env, &m.token, player1_amount + player2_amount)?;
+        Self::attempt_payout(&env, &mut m, &mut record, &winner, MatchState::PendingResult);
+        Ok(())
+    }
+
+    /// Retry a failed payout (#2066). Anyone may call it (an operator or a
+    /// keeper bot): funds only ever go to the recorded payees, and only
+    /// amounts not yet paid are sent. Returns `true` once the match is
+    /// `Completed`, `false` if a transfer failed again (the match stays
+    /// `PayoutFailed`, funds stay in escrow, and the attempt is logged).
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::NoFailedPayout`] — the match isn't `PayoutFailed`.
+    /// * [`Error::InsufficientReserve`] — the escrow can't cover what is still
+    ///   owed; nothing is sent.
+    pub fn retry_payout(env: Env, match_id: u64) -> Result<bool, Error> {
+        Self::validate_match_id(&env, match_id)?;
+        let mut m: Match = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Match(match_id))
+            .ok_or(Error::MatchNotFound)?;
+        if m.state != MatchState::PayoutFailed {
+            return Err(Error::NoFailedPayout);
+        }
+        let mut record: PayoutRecord = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Payout(match_id))
+            .ok_or(Error::NoFailedPayout)?;
+        let winner = match m.pending_winner.clone() {
+            OptionalWinner::Some(w) => w,
+            OptionalWinner::None => return Err(Error::InvalidState),
+        };
+        Self::ensure_reserve_for_payout(&env, &m.token, outstanding(&record))?;
+        Self::attempt_payout(&env, &mut m, &mut record, &winner, MatchState::PayoutFailed);
+        Ok(m.state == MatchState::Completed)
+    }
+
+    /// The payout record of a match whose payout failed, if any (#2066).
+    pub fn get_payout_record(env: Env, match_id: u64) -> Option<PayoutRecord> {
+        env.storage().persistent().get(&DataKey::Payout(match_id))
+    }
+
+    /// How many more token units the escrow needs before this match can be
+    /// paid out, including the reserve buffer; `0` if it can pay now (#2063).
+    ///
+    /// Contract errors can't carry data, so this is how a client turns an
+    /// `InsufficientReserve` error into an exact shortfall.
+    pub fn payout_shortfall(env: Env, match_id: u64) -> Result<i128, Error> {
+        let m: Match = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Match(match_id))
+            .ok_or(Error::MatchNotFound)?;
+        let owed = match m.state {
+            MatchState::PayoutFailed => env
+                .storage()
+                .persistent()
+                .get::<DataKey, PayoutRecord>(&DataKey::Payout(match_id))
+                .map(|r| outstanding(&r))
+                .unwrap_or(0),
+            MatchState::PendingResult | MatchState::Active => stake_i128(&m) * 2,
+            _ => 0,
+        };
+        if owed == 0 {
+            return Ok(0);
+        }
+        let balance = token::Client::new(&env, &m.token).balance(&env.current_contract_address());
+        Ok((owed + ESCROW_RESERVE_BUFFER_STROOPS - balance).max(0))
+    }
+
+    /// Pay one player `gross` minus `fee_share` (#2067, #2069), send the fee
+    /// to the collector, and append the payout to the player's history
+    /// (#2068). Returns whether the player is now paid.
+    ///
+    /// If the fee is at least the gross amount, the player receives the most
+    /// that is left (possibly nothing): a partial payout, logged with its
+    /// shortfall and reason and added to the platform's running total.
+    fn pay_one(
+        env: &Env,
+        client: &token::Client,
+        match_id: u64,
+        player: &Address,
+        gross: i128,
+        fee_share: i128,
+    ) -> bool {
+        let escrow = env.current_contract_address();
+        let fee = fee_share.clamp(0, gross);
+        let net = gross - fee;
+        if net > 0 && !matches!(client.try_transfer(&escrow, player, &net), Ok(Ok(()))) {
+            return false;
+        }
+        if fee > 0 {
+            // The collector is admin-controlled; a failure here reverts the
+            // whole call, so a player is never paid without the fee settling.
+            let collector = Self::fee_config(env).collector;
+            client.transfer(&escrow, &collector, &fee);
+        }
+
+        let now = env.ledger().timestamp();
+        let ledger = env.ledger().sequence();
         env.events().publish(
-            (Symbol::new(&env, "match"), symbol_short!("completed")),
-            (match_id, winner, payout_amount),
+            (Symbol::new(env, "payout"), symbol_short!("paid"), player.clone()),
+            (match_id, gross, fee, net, now),
+        );
+        if net < gross {
+            // #2069: the player got less than the outcome's amount.
+            let shortfall = gross - net;
+            let reason = if fee_share >= gross {
+                symbol_short!("fee_all")
+            } else {
+                symbol_short!("fee")
+            };
+            let total: i128 = env
+                .storage()
+                .instance()
+                .get(&DataKey::TotalShortfall)
+                .unwrap_or(0);
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalShortfall, &(total + shortfall));
+            env.events().publish(
+                (Symbol::new(env, "payout"), symbol_short!("shortfall"), player.clone()),
+                (match_id, shortfall, reason, fee_share, now),
+            );
+        }
+
+        // #2068: append-only payout ledger per address.
+        let storage = env.storage().persistent();
+        let len_key = DataKey::PayoutHistoryLen(player.clone());
+        let n: u32 = storage.get(&len_key).unwrap_or(0);
+        let entry_key = DataKey::PayoutHistory(player.clone(), n);
+        storage.set(
+            &entry_key,
+            &PayoutEntry {
+                match_id,
+                gross,
+                fee,
+                net,
+                timestamp: now,
+                ledger,
+            },
+        );
+        storage.set(&len_key, &(n + 1));
+        storage.extend_ttl(&entry_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        storage.extend_ttl(&len_key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+        true
+    }
+
+    fn fee_config(env: &Env) -> FeeConfig {
+        env.storage()
+            .instance()
+            .get(&DataKey::FeeConfig)
+            .unwrap_or_else(|| FeeConfig {
+                fee_per_payout: 0,
+                policy: FeePolicy::PlatformCovers,
+                collector: env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::SafeAddress)
+                    .unwrap_or_else(|| env.current_contract_address()),
+            })
+    }
+
+    /// The payout fee settings (#2067). Default: no fee, platform covers it.
+    pub fn get_fee_config(env: Env) -> FeeConfig {
+        Self::fee_config(&env)
+    }
+
+    /// Set the payout fee and who bears it (#2067). Requires
+    /// [`Permission::TokenManagement`]. Applies to matches finalized after
+    /// the change; `collector` receives deducted fees. A fee outside
+    /// `0..=MAX_STAKE` is rejected with [`Error::InvalidAmount`].
+    pub fn set_fee_config(
+        env: Env,
+        caller: Address,
+        fee_per_payout: i128,
+        policy: FeePolicy,
+        collector: Address,
+    ) -> Result<(), Error> {
+        Self::require_permission(&env, &caller, Permission::TokenManagement)?;
+        caller.require_auth();
+        Self::audit(&env, symbol_short!("fee_cfg"), &caller, vec![&env, fee_per_payout.into_val(&env), policy.into_val(&env), collector.clone().into_val(&env)]);
+        if !(0..=MAX_STAKE).contains(&fee_per_payout) {
+            // The error enum is at Soroban's 50-variant limit, so reuse InvalidAmount.
+            return Err(Error::InvalidAmount);
+        }
+        let config = FeeConfig {
+            fee_per_payout,
+            policy,
+            collector,
+        };
+        env.storage().instance().set(&DataKey::FeeConfig, &config);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("fee_cfg")),
+            (caller, config),
+        );
+        Ok(())
+    }
+
+    /// What each player of `match_id` would receive if it were paid out now
+    /// under the current fee config: `(gross, fee, net)` for player 1, then
+    /// player 2 (#2067: fee accounting visible to players before payout).
+    pub fn quote_payout(env: Env, match_id: u64) -> Result<Vec<i128>, Error> {
+        let m: Match = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Match(match_id))
+            .ok_or(Error::MatchNotFound)?;
+        let (g1, g2, f1, f2) = match env
+            .storage()
+            .persistent()
+            .get::<DataKey, PayoutRecord>(&DataKey::Payout(match_id))
+        {
+            Some(r) => (r.player1_amount, r.player2_amount, r.player1_fee, r.player2_fee),
+            None => {
+                let winner = match m.pending_winner.clone() {
+                    OptionalWinner::Some(w) => w,
+                    OptionalWinner::None => return Err(Error::InvalidState),
+                };
+                let (g1, g2) = payout_amounts(&winner, stake_i128(&m));
+                let fees = Self::fee_config(&env);
+                (g1, g2, player_fee_share(&fees, g1), player_fee_share(&fees, g2))
+            }
+        };
+        let (f1, f2) = (f1.clamp(0, g1), f2.clamp(0, g2));
+        Ok(vec![&env, g1, f1, g1 - f1, g2, f2, g2 - f2])
+    }
+
+    /// Total by which payouts fell short of their gross amount because of
+    /// fees, across all matches (#2069).
+    pub fn get_total_shortfall(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalShortfall)
+            .unwrap_or(0)
+    }
+
+    /// Number of payouts recorded for `address` (#2068).
+    pub fn get_payout_history_len(env: Env, address: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::PayoutHistoryLen(address))
+            .unwrap_or(0)
+    }
+
+    /// Up to `limit` (max 50) payouts to `address`, oldest first, starting at
+    /// index `start` (#2068).
+    pub fn get_payout_history(env: Env, address: Address, start: u32, limit: u32) -> Vec<PayoutEntry> {
+        let len = Self::get_payout_history_len(env.clone(), address.clone());
+        let end = start.saturating_add(limit.min(50)).min(len);
+        let mut out = Vec::new(&env);
+        let mut i = start;
+        while i < end {
+            if let Some(e) = env
+                .storage()
+                .persistent()
+                .get(&DataKey::PayoutHistory(address.clone(), i))
+            {
+                out.push_back(e);
+            }
+            i += 1;
+        }
+        out
+    }
+
+    /// Try every unpaid transfer in `record` once. On full success the match
+    /// becomes `Completed`; otherwise it is `PayoutFailed` and the record is
+    /// stored for `retry_payout`. Failed transfers don't revert the call, so
+    /// the funds stay in escrow and the attempt is logged on-chain.
+    fn attempt_payout(
+        env: &Env,
+        m: &mut Match,
+        record: &mut PayoutRecord,
+        winner: &Winner,
+        from: MatchState,
+    ) {
+        let client = token::Client::new(env, &m.token);
+        let now = env.ledger().timestamp();
+        record.attempts += 1;
+        record.last_attempt_at = now;
+
+        if !record.player1_paid {
+            record.player1_paid = Self::pay_one(
+                env,
+                &client,
+                m.id,
+                &m.player1,
+                record.player1_amount,
+                record.player1_fee,
+            );
+        }
+        if !record.player2_paid {
+            record.player2_paid = Self::pay_one(
+                env,
+                &client,
+                m.id,
+                &m.player2,
+                record.player2_amount,
+                record.player2_fee,
+            );
+        }
+        let done = record.player1_paid && record.player2_paid;
+
+        if !done {
+            if record.first_failed_at == 0 {
+                record.first_failed_at = now;
+            }
+            let key = DataKey::Payout(m.id);
+            env.storage().persistent().set(&key, record);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, MATCH_TTL_LEDGERS, MATCH_TTL_LEDGERS);
+            if m.state != MatchState::PayoutFailed {
+                m.state = MatchState::PayoutFailed;
+                Self::store_match(env, m);
+                Self::publish_state_transition(env, m, Some(from), MatchState::PayoutFailed, 0, 0);
+            }
+            Self::bump_instance_ttl(env);
+            env.events().publish(
+                (Symbol::new(env, "payout"), symbol_short!("failed")),
+                (
+                    m.id,
+                    record.attempts,
+                    now,
+                    record.player1_paid,
+                    record.player2_paid,
+                ),
+            );
+            return;
+        }
+
+        // STATE TRANSITION: PendingResult | PayoutFailed → Completed
+        m.state = MatchState::Completed;
+        m.completed_ledger = Some(env.ledger().sequence());
+        Self::store_match(env, m);
+        env.storage().persistent().remove(&DataKey::Payout(m.id));
+        Self::bump_instance_ttl(env);
+        Self::publish_state_transition(
+            env,
+            m,
+            Some(from),
+            MatchState::Completed,
+            record.player1_amount as u128,
+            record.player2_amount as u128,
+        );
+        if record.attempts > 1 {
+            env.events().publish(
+                (Symbol::new(env, "payout"), symbol_short!("retried")),
+                (m.id, record.attempts, now),
+            );
+        }
+        let winner_amount = match winner {
+            Winner::Draw => record.player1_amount,
+            _ => record.player1_amount + record.player2_amount,
+        };
+        env.events().publish(
+            (Symbol::new(env, "match"), symbol_short!("completed")),
+            (m.id, winner.clone(), winner_amount),
         );
 
+        // #2073 / #2075: draws and wins are logged and counted separately.
+        let mut stats = Self::outcome_stats(env);
+        match winner {
+            Winner::Draw => stats.draws += 1,
+            Winner::Player1 => {
+                stats.wins += 1;
+                stats.player1_wins += 1;
+            }
+            Winner::Player2 => {
+                stats.wins += 1;
+                stats.player2_wins += 1;
+            }
+        }
+        env.storage().instance().set(&DataKey::OutcomeStats, &stats);
+        if *winner == Winner::Draw {
+            env.events().publish(
+                (Symbol::new(env, "match"), symbol_short!("draw")),
+                (m.id, record.player1_amount, record.player2_amount, stats.draws),
+            );
+        } else {
+            let winner_addr = if *winner == Winner::Player1 { &m.player1 } else { &m.player2 };
+            env.events().publish(
+                (Symbol::new(env, "match"), symbol_short!("win"), winner_addr.clone()),
+                (m.id, winner_amount, stats.wins),
+            );
+        }
+    }
+
+    fn outcome_stats(env: &Env) -> OutcomeStats {
+        env.storage()
+            .instance()
+            .get(&DataKey::OutcomeStats)
+            .unwrap_or_default()
+    }
+
+    /// Completed matches by outcome: wins (split by side) and draws (#2075).
+    pub fn get_outcome_stats(env: Env) -> OutcomeStats {
+        Self::outcome_stats(&env)
+    }
+
+    /// `decimals()` of `token`, which must be at most `MAX_TOKEN_DECIMALS` (#2072).
+    fn read_decimals(env: &Env, token: &Address) -> Result<u32, Error> {
+        let decimals = token::Client::new(env, token)
+            .try_decimals()
+            .map_err(|_| Error::TokenNotSep41)?
+            .map_err(|_| Error::TokenNotSep41)?;
+        if decimals > MAX_TOKEN_DECIMALS {
+            return Err(Error::InvalidTokenMetadata);
+        }
+        Ok(decimals)
+    }
+
+    /// The dispute window that applies to a pending `winner`, in ledgers.
+    fn window_for(env: &Env, winner: &Winner) -> u32 {
+        match winner {
+            Winner::Draw => Self::get_draw_dispute_window_ledgers(env.clone()),
+            _ => Self::get_dispute_window_ledgers(env),
+        }
+    }
+
+    /// The challenge window for draw results, in ledgers (#2076). Defaults
+    /// to the general dispute window.
+    pub fn get_draw_dispute_window_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DrawDisputeWindowLedgers)
+            .unwrap_or_else(|| Self::get_dispute_window_ledgers(&env))
+    }
+
+    /// Set the draw challenge window, in ledgers (#2076): e.g. 720 ≈ 1 hour at
+    /// 5 s per ledger. Admin only; must be 1..=`LEDGERS_PER_WEEK`, otherwise
+    /// `InvalidAmount`. Applies to draws not yet finalized.
+    pub fn set_draw_dispute_window(env: Env, caller: Address, ledgers: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(env.clone())?;
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+        caller.require_auth();
+        Self::audit(&env, symbol_short!("draw_win"), &caller, vec![&env, ledgers.into_val(&env)]);
+        if ledgers == 0 || ledgers > LEDGERS_PER_WEEK {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DrawDisputeWindowLedgers, &ledgers);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("draw_win")),
+            (caller, ledgers),
+        );
         Ok(())
+    }
+
+    /// Dispute a pending draw (#2076). Either player may call it while the
+    /// draw's challenge window is open, and must attach an evidence hash
+    /// (stored like `submit_dispute_evidence`). The match becomes
+    /// `Contested` and the payout is held until `resolve_dispute`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unauthorized`] — `caller` isn't one of the players.
+    /// * [`Error::InvalidState`] — the match has no pending draw.
+    /// * [`Error::DisputeWindowExpired`] — the draw window has closed.
+    pub fn dispute_draw(
+        env: Env,
+        caller: Address,
+        match_id: u64,
+        reason: String,
+        evidence_hash: BytesN<32>,
+    ) -> Result<u32, Error> {
+        Self::validate_match_id(&env, match_id)?;
+        let mut m: Match = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Match(match_id))
+            .ok_or(Error::MatchNotFound)?;
+        if caller != m.player1 && caller != m.player2 {
+            return Err(Error::Unauthorized);
+        }
+        caller.require_auth();
+        if m.state != MatchState::PendingResult
+            || m.pending_winner != OptionalWinner::Some(Winner::Draw)
+        {
+            return Err(Error::InvalidState);
+        }
+        let prl = m.pending_result_ledger.ok_or(Error::InvalidState)?;
+        let deadline = prl + Self::get_draw_dispute_window_ledgers(env.clone());
+        if env.ledger().sequence() > deadline {
+            return Err(Error::DisputeWindowExpired);
+        }
+
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidenceCount(match_id))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &DataKey::DisputeEvidence(match_id, count),
+            &DisputeEvidenceRecord {
+                submitter: caller.clone(),
+                evidence_hash: evidence_hash.clone(),
+                timestamp_ledger: env.ledger().sequence(),
+            },
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeEvidenceCount(match_id), &(count + 1));
+
+        m.state = MatchState::Contested;
+        Self::store_match(&env, &m);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "dispute_draw"), match_id),
+            (caller, reason, evidence_hash, deadline),
+        );
+        Ok(count)
     }
 
     /// Reclaim funds when the oracle never submits a result within the configured timeout.
@@ -1206,21 +1905,21 @@ impl EscrowContract {
         }
 
         let client = token::Client::new(&env, &m.token);
-        let player1_refund: i128 = if m.player1_deposited { m.stake_amount } else { 0 };
-        let player2_refund: i128 = if m.player2_deposited { m.stake_amount } else { 0 };
+        let player1_refund: i128 = if m.player1_deposited { stake_i128(&m) } else { 0 };
+        let player2_refund: i128 = if m.player2_deposited { stake_i128(&m) } else { 0 };
         let refund_total = player1_refund + player2_refund;
         if refund_total > 0 {
             Self::ensure_reserve_for_payout(&env, &m.token, refund_total)?;
         }
         if m.player1_deposited {
             client
-                .try_transfer(&env.current_contract_address(), &m.player1, &m.stake_amount)
+                .try_transfer(&env.current_contract_address(), &m.player1, &stake_i128(&m))
                 .map_err(|_| Error::TransferFailed)?
                 .map_err(|_| Error::TransferFailed)?;
         }
         if m.player2_deposited {
             client
-                .try_transfer(&env.current_contract_address(), &m.player2, &m.stake_amount)
+                .try_transfer(&env.current_contract_address(), &m.player2, &stake_i128(&m))
                 .map_err(|_| Error::TransferFailed)?
                 .map_err(|_| Error::TransferFailed)?;
         }
@@ -1268,6 +1967,7 @@ impl EscrowContract {
     pub fn initiate_drain(env: Env, caller: Address, amount: i128) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::DrainInitiate)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("drn_init"), &caller, vec![&env, amount.into_val(&env)]);
 
         if !Self::is_paused(&env) {
             return Err(Error::NotPaused);
@@ -1304,7 +2004,7 @@ impl EscrowContract {
         let pending = PendingDrain {
             initiator: caller.clone(),
             amount,
-            expires_at,
+            expiry_ledger: expires_at,
         };
         env.storage()
             .instance()
@@ -1334,6 +2034,7 @@ impl EscrowContract {
     pub fn confirm_drain(env: Env, caller: Address) -> Result<(), Error> {
         Self::require_permission(&env, &caller, Permission::DrainConfirm)?;
         caller.require_auth();
+        Self::audit(&env, symbol_short!("drn_conf"), &caller, Vec::new(&env));
 
         let pending: PendingDrain = env
             .storage()
@@ -1344,7 +2045,7 @@ impl EscrowContract {
         if caller == pending.initiator {
             return Err(Error::Unauthorized);
         }
-        if env.ledger().sequence() > pending.expires_at {
+        if env.ledger().sequence() > pending.expiry_ledger {
             env.storage().instance().remove(&DataKey::PendingDrain);
             return Err(Error::DrainApprovalExpired);
         }
@@ -1642,6 +2343,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("arbiter"), &caller, vec![&env, arbiter.clone().into_val(&env)]);
         env.storage().instance().set(&DataKey::Arbiter, &arbiter);
         env.events().publish((Symbol::new(&env, "arbiter_updated"),), arbiter);
         Ok(())
@@ -1677,6 +2379,13 @@ impl EscrowContract {
 
         if m.state != MatchState::PendingResult {
             return Err(Error::InvalidState);
+        }
+        // #2076: a draw can only be contested inside its challenge window.
+        if m.pending_winner == OptionalWinner::Some(Winner::Draw) {
+            let prl = m.pending_result_ledger.ok_or(Error::InvalidState)?;
+            if env.ledger().sequence() > prl + Self::get_draw_dispute_window_ledgers(env.clone()) {
+                return Err(Error::DisputeWindowExpired);
+            }
         }
 
         m.state = MatchState::Contested;
@@ -1760,6 +2469,7 @@ impl EscrowContract {
             return Err(Error::Unauthorized);
         }
         caller.require_auth();
+        Self::audit(&env, symbol_short!("resolve"), &caller, vec![&env, match_id.into_val(&env), winner.clone().into_val(&env)]);
 
         if m.state != MatchState::Contested {
             return Err(Error::NotContested);
@@ -1779,3 +2489,103 @@ impl EscrowContract {
         Ok(())
     }
 }
+
+/// What each player receives for `winner` (#2065): the winner 2 × stake and
+/// the loser nothing; on a draw, each player their own stake back.
+fn payout_amounts(winner: &Winner, stake: i128) -> (i128, i128) {
+    match winner {
+        Winner::Player1 => (stake * 2, 0),
+        Winner::Player2 => (0, stake * 2),
+        Winner::Draw => (stake, stake),
+    }
+}
+
+/// Checks computed payouts against the outcome before any transfer (#2065).
+///
+/// A mismatch can only come from a bug or corrupted state, so it aborts
+/// the whole call with `PayoutMismatch`. Contract errors roll back events, so
+/// the discrepancy is logged as a diagnostic (visible in simulation and in
+/// the failed transaction's diagnostics) rather than as a contract event.
+fn validate_payout(winner: &Winner, stake: i128, player1: i128, player2: i128) -> Result<(), Error> {
+    if *winner == Winner::Draw {
+        validate_draw(stake, player1, player2)?;
+    }
+    let expected = match winner {
+        Winner::Player1 => (stake * 2, 0),
+        Winner::Player2 => (0, stake * 2),
+        Winner::Draw => (stake, stake),
+    };
+    if stake <= 0 || (player1, player2) != expected || player1 + player2 != stake * 2 {
+        return Err(Error::PayoutMismatch);
+    }
+    Ok(())
+}
+
+/// A draw must refund both players identically, exactly their stake, with
+/// no winner bonus (#2074). Checked before any state change or transfer.
+fn validate_draw(stake: i128, player1: i128, player2: i128) -> Result<(), Error> {
+    if stake <= 0 || player1 != player2 || player1 != stake {
+        return Err(Error::PayoutMismatch);
+    }
+    Ok(())
+}
+
+/// The part of `fee_per_payout` a player bears for a payout of `gross`
+/// under the policy (#2067). Not yet capped at `gross`; see `pay_one`.
+fn player_fee_share(fees: &FeeConfig, gross: i128) -> i128 {
+    if gross <= 0 {
+        return 0;
+    }
+    match fees.policy {
+        FeePolicy::PlatformCovers => 0,
+        FeePolicy::PlayerCovers => fees.fee_per_payout,
+        FeePolicy::Split => fees.fee_per_payout / 2,
+    }
+}
+
+/// Convert `amount` from `from` to `to` decimal places, exactly (#2072).
+///
+/// Scaling up multiplies by 10^(to - from) with overflow checks (`Overflow`);
+/// scaling down must not drop any non-zero digit, otherwise funds would be
+/// lost to rounding, so it fails with `InvalidTokenMetadata`.
+fn normalize_amount(amount: i128, from: u32, to: u32) -> Result<i128, Error> {
+    if from == to {
+        return Ok(amount);
+    }
+    let diff = from.abs_diff(to);
+    let factor = 10i128.checked_pow(diff).ok_or(Error::Overflow)?;
+    if to > from {
+        amount.checked_mul(factor).ok_or(Error::Overflow)
+    } else if amount % factor == 0 {
+        Ok(amount / factor)
+    } else {
+        Err(Error::InvalidTokenMetadata)
+    }
+}
+
+/// The amount a payout record still owes.
+fn outstanding(r: &PayoutRecord) -> i128 {
+    (if r.player1_paid { 0 } else { r.player1_amount }) + (if r.player2_paid { 0 } else { r.player2_amount })
+}
+
+/// A match's stake as the `i128` token amounts use. `Match::stake_amount` is
+/// stored as `u128` but validated to `MIN_STAKE..=MAX_STAKE` at creation, far
+/// below `i128::MAX`, so the conversion is lossless.
+fn stake_i128(m: &Match) -> i128 {
+    m.stake_amount as i128
+}
+
+#[cfg(test)]
+mod tests_stake_rules;
+
+#[cfg(test)]
+mod tests_payouts;
+
+#[cfg(test)]
+mod tests_fees_history;
+
+#[cfg(test)]
+mod tests_draws_decimals;
+
+#[cfg(test)]
+mod tests_admin_audit;

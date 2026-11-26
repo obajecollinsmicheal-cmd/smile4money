@@ -309,6 +309,10 @@ pub struct Match {
     /// The player who deposited first. Deposits may arrive in either order;
     /// this records which one actually came first (#2060).
     pub first_depositor: Option<Address>,
+
+    /// The token's `decimals()` when the match was created (#2072). The stake
+    /// is in units of this precision; payouts convert if the token changes.
+    pub token_decimals: u32,
 }
 
 /// The admin-configured stake range for new matches (#2059), in the token's
@@ -590,6 +594,12 @@ pub enum DataKey {
     /// Running total of payout shortfalls caused by fees (#2069).
     TotalShortfall,
 
+    /// Running [`OutcomeStats`] of completed matches (#2075).
+    OutcomeStats,
+
+    /// Dispute window for draw results, in ledgers (#2076).
+    DrawDisputeWindowLedgers,
+
     /// Number of [`PayoutEntry`]s recorded for an address (#2068).
     PayoutHistoryLen(Address),
 
@@ -692,4 +702,16 @@ pub struct PayoutEntry {
     /// Ledger timestamp (seconds) and sequence of the transfer.
     pub timestamp: u64,
     pub ledger: u32,
+}
+
+/// Counts of completed matches by outcome (#2075). Only ever incremented,
+/// when a match reaches `Completed`; nothing can lower or reset them.
+#[contracttype]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OutcomeStats {
+    /// Decisive results (`player1_wins + player2_wins`).
+    pub wins: u64,
+    pub player1_wins: u64,
+    pub player2_wins: u64,
+    pub draws: u64,
 }

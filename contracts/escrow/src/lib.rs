@@ -74,7 +74,8 @@ const CONTRACT_PAUSED: Symbol = symbol_short!("paused");
 const CONTRACT_UNPAUSED: Symbol = symbol_short!("unpaused");
 use types::{
     AdminRole, DataKey, DisputeEvidenceRecord, Match, MatchState, OptionalWinner, PendingDrain,
-    FeeConfig, FeePolicy, PayoutEntry, PayoutRecord, Permission, Platform, StakeLimits, Winner,
+    FeeConfig, FeePolicy, OutcomeStats, PayoutEntry, PayoutRecord, Permission, Platform,
+    StakeLimits, Winner,
 };
 
 fn is_zero_address(env: &Env, addr: &Address) -> bool {
@@ -776,6 +777,9 @@ impl EscrowContract {
             return Err(Error::TokenNotAllowlisted);
         }
 
+        // #2072: record the token's precision; the stake is in its units.
+        let token_decimals = Self::read_decimals(&env, &token)?;
+
         let id: u64 = env
             .storage()
             .instance()
@@ -812,6 +816,7 @@ impl EscrowContract {
             player1_deposited_at: None,
             player2_deposited_at: None,
             first_depositor: None,
+            token_decimals,
         };
 
         Self::store_match(&env, &m);
@@ -1182,19 +1187,23 @@ impl EscrowContract {
             .pending_result_ledger
             .ok_or(Error::InvalidState)?;
         let current = env.ledger().sequence();
-        let dispute_window = Self::get_dispute_window_ledgers(&env);
-        if current <= prl + dispute_window {
-            return Err(Error::DisputeWindowActive);
-        }
-
         let winner = match m.pending_winner.clone() {
             OptionalWinner::Some(w) => w,
             OptionalWinner::None => return Err(Error::InvalidState),
         };
+        // #2076: a draw uses its own (configurable) challenge window.
+        if current <= prl + Self::window_for(&env, &winner) {
+            return Err(Error::DisputeWindowActive);
+        }
+
+        // #2072: express the stake in the token's current precision before
+        // computing payouts; an inexact or overflowing conversion aborts.
+        let current_decimals = Self::read_decimals(&env, &m.token)?;
+        let stake = normalize_amount(stake_i128(&m), m.token_decimals, current_decimals)?;
 
         // #2065: compute and validate the amounts before anything moves.
-        let (player1_amount, player2_amount) = payout_amounts(&winner, stake_i128(&m));
-        validate_payout(&winner, stake_i128(&m), player1_amount, player2_amount)?;
+        let (player1_amount, player2_amount) = payout_amounts(&winner, stake);
+        validate_payout(&winner, stake, player1_amount, player2_amount)?;
         // #2067: fix the fee for each payout now, so a later config change
         // can't alter a match already being paid.
         let fees = Self::fee_config(&env);
@@ -1491,7 +1500,6 @@ impl EscrowContract {
         from: MatchState,
     ) {
         let client = token::Client::new(env, &m.token);
-        let escrow = env.current_contract_address();
         let now = env.ledger().timestamp();
         record.attempts += 1;
         record.last_attempt_at = now;
@@ -1574,6 +1582,162 @@ impl EscrowContract {
             (Symbol::new(env, "match"), symbol_short!("completed")),
             (m.id, winner.clone(), winner_amount),
         );
+
+        // #2073 / #2075: draws and wins are logged and counted separately.
+        let mut stats = Self::outcome_stats(env);
+        match winner {
+            Winner::Draw => stats.draws += 1,
+            Winner::Player1 => {
+                stats.wins += 1;
+                stats.player1_wins += 1;
+            }
+            Winner::Player2 => {
+                stats.wins += 1;
+                stats.player2_wins += 1;
+            }
+        }
+        env.storage().instance().set(&DataKey::OutcomeStats, &stats);
+        if *winner == Winner::Draw {
+            env.events().publish(
+                (Symbol::new(env, "match"), symbol_short!("draw")),
+                (m.id, record.player1_amount, record.player2_amount, stats.draws),
+            );
+        } else {
+            let winner_addr = if *winner == Winner::Player1 { &m.player1 } else { &m.player2 };
+            env.events().publish(
+                (Symbol::new(env, "match"), symbol_short!("win"), winner_addr.clone()),
+                (m.id, winner_amount, stats.wins),
+            );
+        }
+    }
+
+    fn outcome_stats(env: &Env) -> OutcomeStats {
+        env.storage()
+            .instance()
+            .get(&DataKey::OutcomeStats)
+            .unwrap_or_default()
+    }
+
+    /// Completed matches by outcome: wins (split by side) and draws (#2075).
+    pub fn get_outcome_stats(env: Env) -> OutcomeStats {
+        Self::outcome_stats(&env)
+    }
+
+    /// `decimals()` of `token`, which must be at most `MAX_TOKEN_DECIMALS` (#2072).
+    fn read_decimals(env: &Env, token: &Address) -> Result<u32, Error> {
+        let decimals = token::Client::new(env, token)
+            .try_decimals()
+            .map_err(|_| Error::TokenNotSep41)?
+            .map_err(|_| Error::TokenNotSep41)?;
+        if decimals > MAX_TOKEN_DECIMALS {
+            return Err(Error::InvalidTokenMetadata);
+        }
+        Ok(decimals)
+    }
+
+    /// The dispute window that applies to a pending `winner`, in ledgers.
+    fn window_for(env: &Env, winner: &Winner) -> u32 {
+        match winner {
+            Winner::Draw => Self::get_draw_dispute_window_ledgers(env.clone()),
+            _ => Self::get_dispute_window_ledgers(env),
+        }
+    }
+
+    /// The challenge window for draw results, in ledgers (#2076). Defaults
+    /// to the general dispute window.
+    pub fn get_draw_dispute_window_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DrawDisputeWindowLedgers)
+            .unwrap_or_else(|| Self::get_dispute_window_ledgers(&env))
+    }
+
+    /// Set the draw challenge window, in ledgers (#2076): e.g. 720 ≈ 1 hour at
+    /// 5 s per ledger. Admin only; must be 1..=`LEDGERS_PER_WEEK`, otherwise
+    /// `InvalidAmount`. Applies to draws not yet finalized.
+    pub fn set_draw_dispute_window(env: Env, caller: Address, ledgers: u32) -> Result<(), Error> {
+        let admin = Self::get_admin(env.clone())?;
+        if caller != admin {
+            return Err(Error::Unauthorized);
+        }
+        caller.require_auth();
+        if ledgers == 0 || ledgers > LEDGERS_PER_WEEK {
+            return Err(Error::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::DrawDisputeWindowLedgers, &ledgers);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "admin"), symbol_short!("draw_win")),
+            (caller, ledgers),
+        );
+        Ok(())
+    }
+
+    /// Dispute a pending draw (#2076). Either player may call it while the
+    /// draw's challenge window is open, and must attach an evidence hash
+    /// (stored like `submit_dispute_evidence`). The match becomes
+    /// `Contested` and the payout is held until `resolve_dispute`.
+    ///
+    /// # Errors
+    ///
+    /// * [`Error::Unauthorized`] — `caller` isn't one of the players.
+    /// * [`Error::InvalidState`] — the match has no pending draw.
+    /// * [`Error::DisputeWindowExpired`] — the draw window has closed.
+    pub fn dispute_draw(
+        env: Env,
+        caller: Address,
+        match_id: u64,
+        reason: String,
+        evidence_hash: BytesN<32>,
+    ) -> Result<u32, Error> {
+        Self::validate_match_id(&env, match_id)?;
+        let mut m: Match = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Match(match_id))
+            .ok_or(Error::MatchNotFound)?;
+        if caller != m.player1 && caller != m.player2 {
+            return Err(Error::Unauthorized);
+        }
+        caller.require_auth();
+        if m.state != MatchState::PendingResult
+            || m.pending_winner != OptionalWinner::Some(Winner::Draw)
+        {
+            return Err(Error::InvalidState);
+        }
+        let prl = m.pending_result_ledger.ok_or(Error::InvalidState)?;
+        let deadline = prl + Self::get_draw_dispute_window_ledgers(env.clone());
+        if env.ledger().sequence() > deadline {
+            return Err(Error::DisputeWindowExpired);
+        }
+
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::DisputeEvidenceCount(match_id))
+            .unwrap_or(0);
+        env.storage().persistent().set(
+            &DataKey::DisputeEvidence(match_id, count),
+            &DisputeEvidenceRecord {
+                submitter: caller.clone(),
+                evidence_hash: evidence_hash.clone(),
+                timestamp_ledger: env.ledger().sequence(),
+            },
+        );
+        env.storage()
+            .persistent()
+            .set(&DataKey::DisputeEvidenceCount(match_id), &(count + 1));
+
+        m.state = MatchState::Contested;
+        Self::store_match(&env, &m);
+        Self::bump_instance_ttl(&env);
+        env.events().publish(
+            (Symbol::new(&env, "dispute_draw"), match_id),
+            (caller, reason, evidence_hash, deadline),
+        );
+        Ok(count)
     }
 
     /// Reclaim funds when the oracle never submits a result within the configured timeout.
@@ -2123,6 +2287,13 @@ impl EscrowContract {
         if m.state != MatchState::PendingResult {
             return Err(Error::InvalidState);
         }
+        // #2076: a draw can only be contested inside its challenge window.
+        if m.pending_winner == OptionalWinner::Some(Winner::Draw) {
+            let prl = m.pending_result_ledger.ok_or(Error::InvalidState)?;
+            if env.ledger().sequence() > prl + Self::get_draw_dispute_window_ledgers(env.clone()) {
+                return Err(Error::DisputeWindowExpired);
+            }
+        }
 
         m.state = MatchState::Contested;
         env.storage().persistent().set(&DataKey::Match(match_id), &m);
@@ -2266,6 +2437,26 @@ fn player_fee_share(fees: &FeeConfig, gross: i128) -> i128 {
     }
 }
 
+/// Convert `amount` from `from` to `to` decimal places, exactly (#2072).
+///
+/// Scaling up multiplies by 10^(to - from) with overflow checks (`Overflow`);
+/// scaling down must not drop any non-zero digit, otherwise funds would be
+/// lost to rounding, so it fails with `InvalidTokenMetadata`.
+fn normalize_amount(amount: i128, from: u32, to: u32) -> Result<i128, Error> {
+    if from == to {
+        return Ok(amount);
+    }
+    let diff = from.abs_diff(to);
+    let factor = 10i128.checked_pow(diff).ok_or(Error::Overflow)?;
+    if to > from {
+        amount.checked_mul(factor).ok_or(Error::Overflow)
+    } else if amount % factor == 0 {
+        Ok(amount / factor)
+    } else {
+        Err(Error::InvalidTokenMetadata)
+    }
+}
+
 /// The amount a payout record still owes.
 fn outstanding(r: &PayoutRecord) -> i128 {
     (if r.player1_paid { 0 } else { r.player1_amount }) + (if r.player2_paid { 0 } else { r.player2_amount })
@@ -2286,3 +2477,6 @@ mod tests_payouts;
 
 #[cfg(test)]
 mod tests_fees_history;
+
+#[cfg(test)]
+mod tests_draws_decimals;
